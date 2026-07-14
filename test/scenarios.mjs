@@ -360,6 +360,26 @@ export const scenarios = [
       assert.equal(calls.length, 0)
     } },
 
+  { name: 'privileged SANDBOX value (danger-full-access) is rejected',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('esc', { lane: 'codex-high', effort: 'high' })],
+          config: { lanes: { 'codex-high': { directives: { SANDBOX: 'danger-full-access' } } } } },
+        responder())
+      assert.match(result.error, /SANDBOX must be one of/)
+      assert.equal(calls.length, 0)
+    } },
+
+  { name: 'privileged grok MODE (bypassPermissions) is rejected',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('esc2', { lane: 'grok', effort: 'high' })],
+          config: { lanes: { grok: { sandbox: { 'read-only': { MODE: 'bypassPermissions' } } } } } },
+        responder())
+      assert.match(result.error, /MODE must be one of/)
+      assert.equal(calls.length, 0)
+    } },
+
   { name: 'empty worker output is failed, never approved',
     async run(runWorkflow) {
       const { result, calls } = await runWorkflow(

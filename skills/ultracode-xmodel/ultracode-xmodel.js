@@ -97,11 +97,26 @@ for (const key of ['lanes', 'roles', 'auditors']) {
 // single-quotes it and it is validated separately by BAD_PATH.)
 const SAFE_KEY = /^[A-Z][A-Z0-9_]*$/
 const SAFE_TOKEN = /^[A-Za-z0-9._/-]+$/
+// Metacharacter-safety is not enough for the capability-bearing directives:
+// a value like `danger-full-access` or `bypassPermissions` is shell-safe but
+// disables the sandbox/approval boundary. Constrain those to their intended
+// sets; other directives (e.g. MODEL, an open-ended id) only need to be a
+// safe token.
+const DIRECTIVE_ENUMS = {
+  EFFORT: ['low', 'medium', 'high', 'xhigh', 'max'],
+  SANDBOX: ['read-only', 'workspace-write'],
+  MODE: ['plan', 'acceptEdits', 'default'],
+}
 function checkDirectives(dirs, where) {
   for (const k of Object.keys(dirs)) {
     if (dirs[k] == null) continue
     if (!SAFE_KEY.test(k)) return `${where}: directive name "${k}" must be an uppercase identifier`
-    if (!SAFE_TOKEN.test(String(dirs[k]))) return `${where}: directive ${k} value has unsafe characters (spaces/metacharacters)`
+    const v = String(dirs[k])
+    if (DIRECTIVE_ENUMS[k]) {
+      if (!DIRECTIVE_ENUMS[k].includes(v)) return `${where}: directive ${k} must be one of ${DIRECTIVE_ENUMS[k].join('|')}`
+    } else if (!SAFE_TOKEN.test(v)) {
+      return `${where}: directive ${k} value has unsafe characters (spaces/metacharacters)`
+    }
   }
   return null
 }
