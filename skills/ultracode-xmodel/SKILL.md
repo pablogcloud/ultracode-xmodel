@@ -28,7 +28,7 @@ absolute path.
 | `prompt` | yes | Fully self-contained task text — the external CLI cannot see this session |
 | `lane` | no | Force a lane: `codex-high`, `codex-medium`, `grok` (or any lane in CONFIG) |
 | `effort` | no | Force worker reasoning effort |
-| `complexity` | no | 1–5; supplied values skip triage scoring for this field |
+| `complexity` | no | 1–5; explicit values are never overridden by triage |
 | `stakes` | no | `low` or `high`; `high` always gets the full two-voice panel |
 | `dir` | no | Working directory for the CLI run (plain path, no shell metacharacters) |
 | `sandbox` | no | `read-only` (default) or `workspace-write` |
@@ -48,8 +48,10 @@ never overridden.
 
 ## Reading results
 
-Each result carries `id`, `lane`, `effort`, `band`, `output`, `audit`
-(verdict per voice), and `approved`:
+Each result carries `id`, `lane`, `effort`, `band`, `source`, `output`,
+and `approved`. `audit` (verdict per voice) is present only when at least
+one voice actually reviewed the item, and `error` is set when the worker
+lane failed:
 
 - `approved: true` — every audit voice returned `VERDICT: PASS`.
 - `approved: false` — a voice found a defect, returned no verdict, or the
