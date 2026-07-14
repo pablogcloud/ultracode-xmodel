@@ -688,6 +688,73 @@ export const scenarios = [
       assert.equal(a.length, 1)
       assert.match(a[0].opts.agentType, /codex-auditor$/) // cross-family voice still chosen
     } },
+
+  { name: 'duplicate task ids are rejected, both instances',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [
+          t('dup', { lane: 'codex-high', effort: 'high', complexity: 5, stakes: 'high' }),
+          t('dup', { complexity: 1, stakes: 'low' }),
+        ] },
+        responder())
+      assert.equal(workerCalls(calls).length, 0)
+      assert.equal(result.results.length, 0)
+      assert.equal(result.rejected.length, 2)
+      assert.match(result.rejected[0].error, /unique/)
+    } },
+
+  { name: 'invalid explicit stakes or complexity is rejected, not downgraded',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [
+          t('vs', { stakes: 'HIGH' }),
+          t('vc', { complexity: 0 }),
+        ] },
+        responder({ triage: { scores: [] } }))
+      assert.equal(workerCalls(calls).length, 0)
+      assert.equal(result.rejected.length, 2)
+      assert.match(result.rejected[0].error, /invalid explicit stakes/)
+      assert.match(result.rejected[1].error, /invalid explicit complexity/)
+    } },
+
+  { name: 'missing or empty prompt is rejected',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [{ id: 'np' }] },
+        responder({ triage: { scores: [] } }))
+      assert.equal(workerCalls(calls).length, 0)
+      assert.equal(result.rejected.length, 1)
+      assert.match(result.rejected[0].error, /prompt/)
+    } },
+
+  { name: 'explicit complexity and stakes skip triage scoring entirely',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('ex', { complexity: 4, stakes: 'low' })] },
+        responder())
+      assert.equal(calls.filter(isTriage).length, 0)
+      assert.equal(result.results[0].source, 'explicit')
+      assert.equal(result.results[0].band, 'high')
+      assert.equal(auditCalls(calls).length, 2)
+    } },
+
+  { name: 'null config container returns a clean error',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('cc', { lane: 'grok', effort: 'high' })], config: { lanes: null } },
+        responder())
+      assert.match(result.error, /config\.lanes/)
+      assert.equal(calls.length, 0)
+    } },
+
+  { name: 'non-array tasks value returns a clean error',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: 'do stuff' },
+        responder())
+      assert.match(result.error, /non-empty array/)
+      assert.equal(calls.length, 0)
+    } },
 ]
 ```
 
@@ -793,11 +860,18 @@ if (typeof input === 'string') {
   }
 }
 const tasks = (input && input.tasks) || []
-if (!tasks.length) {
-  return { error: 'args.tasks is empty — pass { tasks: [{ id, prompt, ... }] }' }
+if (!Array.isArray(tasks) || !tasks.length) {
+  return { error: 'args.tasks must be a non-empty array — pass { tasks: [{ id, prompt, ... }] }' }
 }
 const doAudit = !input || input.audit !== false
 const cfg = deepMerge(CONFIG, input && input.config)
+// A config override may null out a whole container; fail cleanly, not with
+// a TypeError deep in routing.
+for (const key of ['lanes', 'roles', 'auditors']) {
+  if (!cfg[key] || typeof cfg[key] !== 'object' || Array.isArray(cfg[key])) {
+    return { error: `config.${key} must be an object` }
+  }
+}
 // Dropping an auditor or lane via config (e.g. { auditors: { grok: null } })
 // leaves a null entry; remove them, then heal any role that pointed at a
 // removed lane so a degraded install still routes to what exists.
@@ -817,24 +891,40 @@ for (const role of Object.keys(cfg.roles)) {
 // inject extra directive lines.
 const BAD_PATH = /[\n\r;|&'"`$]/
 const SANDBOXES = ['read-only', 'workspace-write']
-const isUnsafe = t => (t.dir && BAD_PATH.test(String(t.dir))) || (t.sandbox && !SANDBOXES.includes(t.sandbox))
-// An explicit lane that doesn't exist is a caller error: reject it rather
-// than silently rerouting — explicit values are never overridden.
-const unknownLane = t => t.lane && !cfg.lanes[t.lane]
-const rejected = tasks
-  .filter(isUnsafe)
-  .map(t => ({ id: t.id, error: 'rejected: dir contains shell/quote/newline characters, or sandbox is not read-only|workspace-write' }))
-  .concat(tasks
-    .filter(t => !isUnsafe(t) && unknownLane(t))
-    .map(t => ({ id: t.id, error: `rejected: unknown lane "${t.lane}"` })))
-const runnable = tasks.filter(t => !isUnsafe(t) && !unknownLane(t))
-if (rejected.length) log(`${rejected.length} task(s) rejected before dispatch (unsafe values or unknown lane)`)
+// Caller errors are rejected, never guessed around: routing state is keyed
+// by id (duplicates would silently corrupt it), and an invalid explicit
+// complexity/stakes would otherwise band LOW — a silent downgrade.
+const idCount = {}
+for (const t of tasks) {
+  const k = typeof t.id === 'string' && t.id ? t.id : ''
+  idCount[k] = (idCount[k] || 0) + 1
+}
+function rejectionOf(t) {
+  if (!(typeof t.id === 'string' && t.id) || idCount[t.id] > 1) return 'rejected: id must be a unique non-empty string'
+  if (!(typeof t.prompt === 'string' && t.prompt.trim())) return 'rejected: prompt must be a non-empty string'
+  if (t.complexity != null && !(Number.isInteger(t.complexity) && t.complexity >= 1 && t.complexity <= 5)) return 'rejected: invalid explicit complexity (integer 1-5)'
+  if (t.stakes != null && t.stakes !== 'low' && t.stakes !== 'high') return 'rejected: invalid explicit stakes ("low"|"high")'
+  if (t.effort != null && typeof t.effort !== 'string') return 'rejected: invalid explicit effort'
+  if ((t.dir && BAD_PATH.test(String(t.dir))) || (t.sandbox && !SANDBOXES.includes(t.sandbox))) return 'rejected: dir contains shell/quote/newline characters, or sandbox is not read-only|workspace-write'
+  if (t.lane && !cfg.lanes[t.lane]) return `rejected: unknown lane "${t.lane}"`
+  return null
+}
+const rejected = []
+const runnable = []
+for (const t of tasks) {
+  const reason = rejectionOf(t)
+  if (reason) rejected.push({ id: t.id, error: reason })
+  else runnable.push(t)
+}
+if (rejected.length) log(`${rejected.length} task(s) rejected before dispatch (invalid ids/fields, unsafe values, or unknown lane)`)
 
 // ------------------------------ triage ---------------------------------
 phase('Triage')
-const fullyLabeled = t =>
-  t.lane && t.effort && (!doAudit || (t.complexity != null && t.stakes != null))
-const toScore = runnable.filter(t => !fullyLabeled(t))
+// Score only tasks whose banding actually needs it: something is missing
+// AND the result would be used (with auditing off, a task that already has
+// lane + effort routes entirely on explicit values).
+const toScore = runnable.filter(t =>
+  (t.complexity == null || t.stakes == null) && !(t.lane && t.effort && !doAudit))
 const scores = {}
 if (toScore.length) {
   const triagePrompt = [
@@ -1016,7 +1106,7 @@ return { results: done, rejected }
 - [ ] **Step 2: Run harness to verify GREEN**
 
 Run: `node test/harness.mjs`
-Expected: `21/21 scenarios passed`, exit 0. If any scenario fails, fix the script (not the scenario) unless the scenario contradicts the spec.
+Expected: `27/27 scenarios passed`, exit 0. If any scenario fails, fix the script (not the scenario) unless the scenario contradicts the spec.
 
 - [ ] **Step 3: Run static checks**
 
@@ -1988,3 +2078,5 @@ git add -A && git commit -m "fix: cross-model review findings"
 A pre-execution adversarial review (Codex gpt-5.6, 17 findings) was applied to this plan. Disposition:
 
 1. Grok lane ignored `sandbox` and defaulted write-enabled → lane-level sandbox→MODE mapping, grok-worker default MODE now `plan`, scenario added. 2. No degradation path without manual config → role healing on removed lanes + `xmodel-doctor --config` emitter + SKILL/README guidance, scenario added. 3. Malformed triage entries accepted → per-entry validation + try/catch around the triage call, scenario added. 4. Unknown explicit lane silently rerouted → rejected instead, scenario added. 5. Misleading fail-safe metadata on audit-off tasks → band `null`/source `explicit`, scenario updated. 6. `PASSING` parsed as PASS → negative lookahead in verdict regex, scenario added. 7. Mid-text WRAPPER-ERROR mention treated as failure → start-anchored sentinel check, scenario added. 8. Null-worker result contract untested → scenario added. 9. Permissive mocks / no CI pipeline e2e → mocks now enforce exact flag shapes with negative tests + MOCK_CLI_EXIT injection; a CI run of the real Workflow runtime is not possible (requires a Claude Code session), covered locally by Task 13's mock pipeline run — accepted limitation, stated here. 10. Doctor passed on broken CLIs → usable = `--version` exits 0; broken installs FAIL. 11. Smoke recipe non-deterministic and Task 13 counts wrong → explicit complexity/stakes labels, exact 5-call pattern. 12. Spec/plan installer destination conflict → spec §2 corrected to the skill-dir design. 13. Fresh-install test not clean → CLAUDE_CONFIG_DIR sandbox session. 14. Missing meta-literal lint → added to check.sh (best-effort literal evaluation). 15. Model IDs hardcoded in doctor/mock checks → doctor derives models from CONFIG; mock checks use arbitrary IDs. 16. SECURITY.md overclaims (MCP reachability, "exactly one invocation") → wording corrected; codex-auditor step gains an MCP-disable investigation note. 17. check.sh mktemp leak → tmpdir pattern.
+
+Execution-round findings (Task 4 implementer + reviewer, 2026-07-14): check.sh's `node --check` can never pass on a workflow script (top-level `return` is wrapper-legal only) → compile via the runtime-style `new Function` wrapper instead; duplicate task ids silently corrupted id-keyed routing state → ids must be unique non-empty strings, all duplicates rejected; unvalidated explicit complexity/stakes could silently band LOW (e.g. `stakes:'HIGH'`, `complexity:0`) → explicit routing fields validated, invalid values rejected; null config containers and non-array `tasks` crashed with TypeErrors → clean `{error}` returns; missing/empty prompts dispatched the literal string "undefined" → rejected; tasks carrying explicit complexity+stakes no longer waste a triage call and now report `source: 'explicit'`. Scenarios 22–27 added (27 total). MCP-disable investigation (finding 16) resolved empirically: the Codex CLI's `-c mcp_servers={}` merges rather than clears, so no per-invocation disable exists — auditor command unchanged, SECURITY.md wording already covers it.
