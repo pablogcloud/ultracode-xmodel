@@ -25,7 +25,7 @@ Decision: ship the workflow `.js` **inside the plugin's skill directory**. SKILL
 /plugin install ultracode-xmodel
 ```
 
-Benefits: no separate workflow install step; scriptPath invocation always reads the current file, sidestepping the stale named-workflow-registry snapshot trap. `install.sh` remains for non-plugin users (plain copies into `~/.claude/agents/` and `~/.claude/workflows/`).
+Benefits: no separate workflow install step; scriptPath invocation always reads the current file, sidestepping the stale named-workflow-registry snapshot trap. `install.sh` remains for non-plugin users: it copies the agents into `~/.claude/agents/` and the skill directory (SKILL.md + co-located workflow script, with `agentPrefix` rewritten to `''`) into `~/.claude/skills/` — the workflow is always invoked via scriptPath from the skill directory, so nothing is placed in `~/.claude/workflows/`.
 
 Agent namespacing: plugin-shipped agents resolve as `ultracode-xmodel:codex-worker` (same pattern as `codex:codex-rescue`); manual installs resolve as `codex-worker`. The script carries one `AGENT_PREFIX` constant (default `'ultracode-xmodel:'`, set to `''` for manual installs). The smoke test verifies the plugin-namespaced form.
 

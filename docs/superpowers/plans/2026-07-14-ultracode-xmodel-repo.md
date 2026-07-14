@@ -201,7 +201,7 @@ You are a thin relay to the Grok CLI. You NEVER solve, improve, or summarize the
    - `MODEL: <id>` (default: grok-4.5)
    - `DIR: <path>` — working directory for the run (default: your scratchpad directory, or /tmp if none listed)
    - `EFFORT: <low|medium|high>` — reasoning effort (default: high)
-   - `MODE: <acceptEdits|plan|default>` — permission mode (default: acceptEdits)
+   - `MODE: <acceptEdits|plan|default>` — permission mode (default: plan, which is read-only; use acceptEdits ONLY when the task requires editing files)
 2. Write the remaining task text VERBATIM to a prompt file with the Write tool. Pick a UNIQUE filename (include the task id or a random suffix — concurrent relays may share the directory). Never inline long prompts as shell arguments.
 3. Let RID be the unique suffix you chose in step 2. Run exactly ONE Bash call (timeout 600000), single-quoting every path. REFUSE the task (return GROK-WRAPPER-ERROR) if DIR contains shell metacharacters, quotes, or newlines (`;`, `|`, `&`, `'`, `"`, backticks, `$`, newline):
    ```
@@ -246,6 +246,8 @@ You are a thin relay to the Codex CLI. You NEVER audit the material yourself —
 
 Hard rules: one CLI invocation, read-only sandbox always, no MCP/web calls of your own, verdict line always present.
 ```
+
+Implementation note for this step: check whether the installed Codex CLI supports disabling MCP servers per-invocation (e.g. a `-c` config override such as `mcp_servers={}` — verify against `codex exec --help` / config docs). If supported, add it to the auditor's command line so the audit invocation cannot reach configured MCP servers, and record the exact flag in the report. If unsupported, leave the command as written — Task 10's SECURITY.md wording already reflects instruction-level control for this case.
 
 - [ ] **Step 4: Write `agents/grok-auditor.md`**
 
@@ -310,12 +312,26 @@ for f in agents/codex-auditor.md agents/grok-auditor.md; do
   grep -q 'VERDICT: NO-VERDICT' "$f" || err "$f: NO-VERDICT fallback missing"
 done
 
-# --- Workflow JS syntax (present from Task 4 on) ---
+# --- Workflow JS syntax + meta literal (present from Task 4 on) ---
 if [ -f skills/ultracode-xmodel/ultracode-xmodel.js ]; then
-  tmp=$(mktemp -t xmodel-XXXXXX).mjs
-  cp skills/ultracode-xmodel/ultracode-xmodel.js "$tmp"
-  node --check "$tmp" || err "workflow script has a syntax error"
-  rm -f "$tmp"
+  tmpdir=$(mktemp -d)
+  cp skills/ultracode-xmodel/ultracode-xmodel.js "$tmpdir/wf.mjs"
+  node --check "$tmpdir/wf.mjs" || err "workflow script has a syntax error"
+  rm -rf "$tmpdir"
+  # Best-effort meta lint: the meta block must evaluate as a bare object
+  # literal (free identifiers throw) and carry name + description strings.
+  node -e '
+    const fs = require("fs");
+    const src = fs.readFileSync("skills/ultracode-xmodel/ultracode-xmodel.js", "utf8");
+    const m = src.match(/export const meta = (\{[\s\S]*?\n\})\n/);
+    if (!m) { console.error("meta block not found"); process.exit(1); }
+    let obj;
+    try { obj = new Function("\"use strict\"; return (" + m[1] + ")")(); }
+    catch (e) { console.error("meta is not a pure literal: " + e.message); process.exit(1); }
+    for (const k of ["name", "description"]) {
+      if (typeof obj[k] !== "string") { console.error("meta." + k + " missing"); process.exit(1); }
+    }
+  ' || err "workflow meta lint failed"
 fi
 
 # --- Shell scripts ---
@@ -441,6 +457,7 @@ export const scenarios = [
       const w = workerCalls(calls)[0]
       assert.match(w.opts.agentType, /grok-worker$/)
       assert.match(w.prompt, /EFFORT: low/)
+      assert.match(w.prompt, /MODE: plan/) // grok lane enforces read-only by default
       assert.equal(result.results[0].approved, null) // complexity 1 + low stakes → audit skipped
     } },
 
@@ -571,6 +588,8 @@ export const scenarios = [
       assert.equal(calls.filter(isTriage).length, 0) // lane+effort+audit:false = fully labeled
       assert.equal(auditCalls(calls).length, 0)
       assert.equal(result.results[0].approved, null)
+      assert.equal(result.results[0].band, null)       // nothing was triaged...
+      assert.equal(result.results[0].source, 'explicit') // ...and nothing escalated
     } },
 
   { name: 'args as JSON string still parses',
@@ -579,6 +598,87 @@ export const scenarios = [
         JSON.stringify({ tasks: [t('n', { lane: 'grok', effort: 'high' })], audit: false }),
         responder())
       assert.equal(result.results[0].id, 'n')
+    } },
+
+  { name: 'grok lane maps workspace-write sandbox to acceptEdits mode',
+    async run(runWorkflow) {
+      const { calls } = await runWorkflow(
+        { tasks: [t('o', { lane: 'grok', effort: 'high', complexity: 3, stakes: 'low', sandbox: 'workspace-write' })] },
+        responder())
+      const w = workerCalls(calls)[0]
+      assert.match(w.prompt, /MODE: acceptEdits/)
+      assert.doesNotMatch(w.prompt, /SANDBOX:/) // grok CLI has no sandbox flag
+    } },
+
+  { name: 'unknown explicit lane is rejected, never rerouted',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('p', { lane: 'nope', effort: 'low', complexity: 1, stakes: 'low' })] },
+        responder())
+      assert.equal(workerCalls(calls).length, 0)
+      assert.equal(result.results.length, 0)
+      assert.equal(result.rejected.length, 1)
+      assert.match(result.rejected[0].error, /unknown lane/)
+    } },
+
+  { name: 'malformed triage entry escalates that task',
+    async run(runWorkflow) {
+      const { calls } = await runWorkflow(
+        { tasks: [t('x')] },
+        responder({ triage: { scores: [{ id: 'x', complexity: 1, stakes: 'bogus', rationale: 'r' }] } }))
+      const w = workerCalls(calls)[0]
+      assert.match(w.opts.agentType, /codex-worker$/) // strongest role, not cheapest
+      assert.match(w.prompt, /EFFORT: high/)
+      assert.equal(auditCalls(calls).length, 2)
+    } },
+
+  { name: 'VERDICT: PASSING does not parse as PASS',
+    async run(runWorkflow) {
+      const { result } = await runWorkflow(
+        { tasks: [t('q', { lane: 'codex-high', effort: 'high', complexity: 4, stakes: 'low' })] },
+        responder({ verdicts: {
+          'ultracode-xmodel:grok-auditor': 'PASSING smoothly',
+          'ultracode-xmodel:codex-auditor': 'PASSING smoothly',
+        } }))
+      assert.equal(result.results[0].approved, false)
+    } },
+
+  { name: 'sentinel mentioned mid-text is not a relay failure',
+    async run(runWorkflow) {
+      const { result } = await runWorkflow(
+        { tasks: [t('s', { lane: 'codex-high', effort: 'high', complexity: 4, stakes: 'low' })] },
+        (prompt, opts) => {
+          if (/worker/.test(opts.agentType || ''))
+            return 'The literal CODEX-WRAPPER-ERROR: sentinel is handled in line 42.'
+          return 'x\nVERDICT: PASS'
+        })
+      assert.equal(result.results[0].error, undefined)
+      assert.equal(result.results[0].approved, true)
+    } },
+
+  { name: 'worker null result yields failed item with error set',
+    async run(runWorkflow) {
+      const { result } = await runWorkflow(
+        { tasks: [t('u', { lane: 'codex-high', effort: 'high', complexity: 3, stakes: 'low' })] },
+        (prompt, opts) => {
+          if (/worker/.test(opts.agentType || '')) return null
+          return 'x\nVERDICT: PASS'
+        })
+      assert.equal(result.results[0].approved, false)
+      assert.match(result.results[0].error, /worker returned null/)
+    } },
+
+  { name: 'dropping lanes via config remaps roles to an available lane',
+    async run(runWorkflow) {
+      const { calls } = await runWorkflow(
+        { tasks: [t('r')],
+          config: { lanes: { 'codex-high': null, 'codex-medium': null } } },
+        responder({ triage: { scores: [{ id: 'r', complexity: 3, stakes: 'low', rationale: 'std' }] } }))
+      const w = workerCalls(calls)[0]
+      assert.match(w.opts.agentType, /grok-worker$/) // roles healed to the only remaining lane
+      const a = auditCalls(calls)
+      assert.equal(a.length, 1)
+      assert.match(a[0].opts.agentType, /codex-auditor$/) // cross-family voice still chosen
     } },
 ]
 ```
@@ -627,7 +727,10 @@ const CONFIG = {
   lanes: {
     'codex-high':   { agent: 'codex-worker', family: 'codex', directives: { MODEL: 'gpt-5.6-terra', EFFORT: 'high' } },
     'codex-medium': { agent: 'codex-worker', family: 'codex', directives: { MODEL: 'gpt-5.6-terra', EFFORT: 'medium' } },
-    'grok':         { agent: 'grok-worker',  family: 'grok',  directives: { MODEL: 'grok-4.5', EFFORT: 'high' } },
+    'grok':         { agent: 'grok-worker',  family: 'grok',  directives: { MODEL: 'grok-4.5', EFFORT: 'high' },
+                      // The grok CLI expresses write access via permission mode, not a
+                      // sandbox flag; map the task's sandbox field accordingly.
+                      sandbox: { 'read-only': { MODE: 'plan' }, 'workspace-write': { MODE: 'acceptEdits' } } },
   },
   // Which lane each routing role points at.
   roles: { cheapest: 'codex-medium', default: 'codex-high', strongest: 'codex-high' },
@@ -687,8 +790,19 @@ if (!tasks.length) {
 }
 const doAudit = !input || input.audit !== false
 const cfg = deepMerge(CONFIG, input && input.config)
-// Dropping an auditor via config { auditors: { grok: null } } leaves a null entry.
+// Dropping an auditor or lane via config (e.g. { auditors: { grok: null } })
+// leaves a null entry; remove them, then heal any role that pointed at a
+// removed lane so a degraded install still routes to what exists.
 for (const k of Object.keys(cfg.auditors)) if (!cfg.auditors[k]) delete cfg.auditors[k]
+for (const k of Object.keys(cfg.lanes)) if (!cfg.lanes[k]) delete cfg.lanes[k]
+const laneNames = Object.keys(cfg.lanes)
+if (!laneNames.length) return { error: 'no lanes configured' }
+for (const role of Object.keys(cfg.roles)) {
+  if (!cfg.lanes[cfg.roles[role]]) {
+    log(`role "${role}" pointed at unavailable lane "${cfg.roles[role]}" — remapped to "${laneNames[0]}"`)
+    cfg.roles[role] = laneNames[0]
+  }
+}
 
 // ------------------------------ safety ---------------------------------
 // Reject values that could break the relays' quoted shell commands or
@@ -696,11 +810,17 @@ for (const k of Object.keys(cfg.auditors)) if (!cfg.auditors[k]) delete cfg.audi
 const BAD_PATH = /[\n\r;|&'"`$]/
 const SANDBOXES = ['read-only', 'workspace-write']
 const isUnsafe = t => (t.dir && BAD_PATH.test(String(t.dir))) || (t.sandbox && !SANDBOXES.includes(t.sandbox))
+// An explicit lane that doesn't exist is a caller error: reject it rather
+// than silently rerouting — explicit values are never overridden.
+const unknownLane = t => t.lane && !cfg.lanes[t.lane]
 const rejected = tasks
   .filter(isUnsafe)
   .map(t => ({ id: t.id, error: 'rejected: dir contains shell/quote/newline characters, or sandbox is not read-only|workspace-write' }))
-const runnable = tasks.filter(t => !isUnsafe(t))
-if (rejected.length) log(`${rejected.length} task(s) rejected before dispatch (unsafe dir/sandbox values)`)
+  .concat(tasks
+    .filter(t => !isUnsafe(t) && unknownLane(t))
+    .map(t => ({ id: t.id, error: `rejected: unknown lane "${t.lane}"` })))
+const runnable = tasks.filter(t => !isUnsafe(t) && !unknownLane(t))
+if (rejected.length) log(`${rejected.length} task(s) rejected before dispatch (unsafe values or unknown lane)`)
 
 // ------------------------------ triage ---------------------------------
 phase('Triage')
@@ -719,11 +839,23 @@ if (toScore.length) {
     '',
     JSON.stringify(toScore.map(t => ({ id: t.id, prompt: String(t.prompt).slice(0, 2000) }))),
   ].join('\n')
-  const res = await agent(triagePrompt, {
-    label: 'triage', phase: 'Triage', model: 'haiku', effort: 'low', schema: TRIAGE_SCHEMA,
-  })
+  let res = null
+  try {
+    res = await agent(triagePrompt, {
+      label: 'triage', phase: 'Triage', model: 'haiku', effort: 'low', schema: TRIAGE_SCHEMA,
+    })
+  } catch (e) {
+    log('triage call failed: ' + ((e && e.message) || 'unknown error'))
+  }
+  // Validate every entry — a malformed score must escalate, never mis-route.
+  const validScore = s => s && typeof s.id === 'string'
+    && Number.isInteger(s.complexity) && s.complexity >= 1 && s.complexity <= 5
+    && (s.stakes === 'low' || s.stakes === 'high')
   if (res && Array.isArray(res.scores)) {
-    for (const s of res.scores) scores[s.id] = s
+    for (const s of res.scores) {
+      if (validScore(s)) scores[s.id] = s
+      else log(`triage entry for "${s && s.id}" is malformed — that task escalates`)
+    }
   }
   const missing = toScore.filter(t => !scores[t.id] && (t.complexity == null || t.stakes == null))
   if (missing.length) log(`triage incomplete for ${missing.length} task(s) — they escalate to the strongest lane + full panel`)
@@ -742,21 +874,23 @@ function routeOf(t) {
   const stakes = t.stakes != null ? t.stakes : s.stakes
   let band, source
   if (complexity == null || stakes == null) {
-    band = 'high' // fail-safe: unresolved triage escalates, never degrades
-    source = 'fail-safe'
+    if (t.lane && t.effort && !doAudit) {
+      // Fully explicit routing with auditing off: nothing was triaged and
+      // nothing escalated — report it that way.
+      band = null
+      source = 'explicit'
+    } else {
+      band = 'high' // fail-safe: unresolved triage escalates, never degrades
+      source = 'fail-safe'
+    }
   } else {
     band = bandOf(complexity, stakes)
     source = scores[t.id] ? 'triage' : 'explicit'
   }
-  const spec = BANDS[band]
-  let laneName = t.lane
-  if (laneName && !cfg.lanes[laneName]) {
-    log(`route ${t.id}: unknown lane "${laneName}" — using role "${spec.role}"`)
-    laneName = null
-  }
-  if (!laneName) laneName = cfg.roles[spec.role]
-  const effort = t.effort != null ? t.effort : spec.effort
-  const audit = doAudit ? spec.audit : 'none'
+  const spec = band ? BANDS[band] : null
+  const laneName = t.lane || cfg.roles[spec ? spec.role : 'strongest']
+  const effort = t.effort != null ? t.effort : (spec ? spec.effort : 'high')
+  const audit = !doAudit ? 'none' : spec.audit
   return { band, source, laneName, effort, audit, complexity, stakes }
 }
 
@@ -777,7 +911,13 @@ function workerPrompt(t) {
   const lane = cfg.lanes[r.laneName]
   const d = { ...lane.directives, EFFORT: r.effort }
   if (t.dir) d.DIR = t.dir
-  if (t.sandbox) d.SANDBOX = t.sandbox
+  // Sandbox: lanes whose CLI has no sandbox flag declare a mapping (e.g.
+  // grok's permission modes); it is always applied so the read-only default
+  // is enforced, not assumed. Other lanes pass SANDBOX through only when
+  // the task asked for it (their relay already defaults to read-only).
+  const sb = t.sandbox || 'read-only'
+  if (lane.sandbox) Object.assign(d, lane.sandbox[sb] || {})
+  else if (t.sandbox) d.SANDBOX = t.sandbox
   return directiveBlock(d) + '\n\n' + t.prompt
 }
 
@@ -794,10 +934,14 @@ function auditPrompt(t, auditor, output) {
   ].filter(Boolean).join('\n\n')
 }
 
+// The relays place their failure sentinel at the very start of the output;
+// a mention of the sentinel elsewhere in ordinary text is not a failure.
+const isWrapperError = s => typeof s === 'string' && /^\s*(CODEX|GROK)-WRAPPER-ERROR:/.test(s)
+
 function verdictOf(text) {
   if (typeof text !== 'string' || !text.trim()) return { verdict: 'ERROR', detail: 'auditor returned nothing' }
-  if (text.includes('WRAPPER-ERROR')) return { verdict: 'ERROR', detail: text.slice(0, 300) }
-  const all = [...text.matchAll(/VERDICT:\s*(PASS|DEFECT|NO-VERDICT)\s*[—-]?\s*([^\n]*)/gi)]
+  if (isWrapperError(text)) return { verdict: 'ERROR', detail: text.slice(0, 300) }
+  const all = [...text.matchAll(/VERDICT:\s*(PASS|DEFECT|NO-VERDICT)(?![A-Za-z])\s*[—-]?\s*([^\n]*)/gi)]
   if (!all.length) return { verdict: 'NO-VERDICT', detail: text.slice(-400) }
   const m = all[all.length - 1]
   return { verdict: m[1].toUpperCase(), detail: (m[2] || '').trim() }
@@ -832,7 +976,7 @@ const results = await pipeline(
     const r = routes[t.id]
     const base = { id: t.id, lane: r.laneName, effort: r.effort, band: r.band, source: r.source }
     if (output == null) return { ...base, output: null, approved: false, error: 'worker returned null (skipped or died)' }
-    if (typeof output === 'string' && output.includes('WRAPPER-ERROR')) {
+    if (isWrapperError(output)) {
       return { ...base, output, approved: false, error: 'worker lane failed — see output' }
     }
     const voices = voicesFor(t)
@@ -864,7 +1008,7 @@ return { results: done, rejected }
 - [ ] **Step 2: Run harness to verify GREEN**
 
 Run: `node test/harness.mjs`
-Expected: `14/14 scenarios passed`, exit 0. If any scenario fails, fix the script (not the scenario) unless the scenario contradicts the spec.
+Expected: `21/21 scenarios passed`, exit 0. If any scenario fails, fix the script (not the scenario) unless the scenario contradicts the spec.
 
 - [ ] **Step 3: Run static checks**
 
@@ -895,23 +1039,36 @@ git add -A && git commit -m "feat: workflow with triage-based effort routing and
 
 ```bash
 #!/usr/bin/env bash
-# Mock Codex CLI for quota-free pipeline runs. Honors the flag shape used
-# by agents/codex-worker.md and agents/codex-auditor.md.
+# Mock Codex CLI for quota-free pipeline runs. Enforces the exact flag shape
+# used by agents/codex-worker.md and agents/codex-auditor.md — a missing or
+# unexpected flag is a failure, so drift between relays and mocks is caught.
+# Set MOCK_CLI_EXIT to force a nonzero exit (failure-path testing).
 set -u
-model="" lastmsg="" stdin_marker=""
+[ -n "${MOCK_CLI_EXIT:-}" ] && { echo "mock codex: forced failure" >&2; exit "$MOCK_CLI_EXIT"; }
+model="" lastmsg="" stdin_marker="" sandbox="" chdir="" cfg="" skipgit="" sub=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    exec) shift ;;
-    --sandbox|-C|-c) shift 2 ;;
-    --skip-git-repo-check) shift ;;
+    exec) sub="exec"; shift ;;
+    --sandbox) sandbox="$2"; shift 2 ;;
+    -C) chdir="$2"; shift 2 ;;
+    -c) cfg="$2"; shift 2 ;;
+    --skip-git-repo-check) skipgit="yes"; shift ;;
     -m) model="$2"; shift 2 ;;
     -o) lastmsg="$2"; shift 2 ;;
     -) stdin_marker="yes"; shift ;;
-    *) shift ;;
+    *) echo "mock codex: unexpected arg $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$stdin_marker" ] || { echo "mock codex: expected '-' (stdin prompt)" >&2; exit 2; }
-[ -n "$lastmsg" ] || { echo "mock codex: expected -o <file>" >&2; exit 2; }
+missing=""
+[ "$sub" = "exec" ] || missing="$missing exec"
+[ -n "$sandbox" ] || missing="$missing --sandbox"
+[ -n "$chdir" ] || missing="$missing -C"
+[ -n "$cfg" ] || missing="$missing -c"
+[ -n "$skipgit" ] || missing="$missing --skip-git-repo-check"
+[ -n "$model" ] || missing="$missing -m"
+[ -n "$lastmsg" ] || missing="$missing -o"
+[ -n "$stdin_marker" ] || missing="$missing -(stdin)"
+[ -z "$missing" ] || { echo "mock codex: missing:$missing" >&2; exit 2; }
 prompt=$(cat)
 if printf '%s' "$prompt" | grep -q 'MATERIAL UNDER AUDIT'; then
   if printf '%s' "$prompt" | grep -q 'INJECT_DEFECT'; then
@@ -920,7 +1077,7 @@ if printf '%s' "$prompt" | grep -q 'MATERIAL UNDER AUDIT'; then
     printf 'Mock critique.\nVERDICT: PASS\n' > "$lastmsg"
   fi
 else
-  printf 'MOCK WORK OUTPUT (%s)\n' "${model:-unknown-model}" > "$lastmsg"
+  printf 'MOCK WORK OUTPUT (%s)\n' "$model" > "$lastmsg"
 fi
 echo "mock codex ok"
 exit 0
@@ -930,20 +1087,30 @@ exit 0
 
 ```bash
 #!/usr/bin/env bash
-# Mock Grok CLI. Honors the flag shape used by agents/grok-worker.md and
-# agents/grok-auditor.md. Output goes to stdout, like the real CLI.
+# Mock Grok CLI. Enforces the exact flag shape used by agents/grok-worker.md
+# and agents/grok-auditor.md; output goes to stdout, like the real CLI.
+# Set MOCK_CLI_EXIT to force a nonzero exit (failure-path testing).
 set -u
-model="" promptfile=""
+[ -n "${MOCK_CLI_EXIT:-}" ] && { echo "mock grok: forced failure" >&2; exit "$MOCK_CLI_EXIT"; }
+model="" promptfile="" effort="" mode="" nosub=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -m) model="$2"; shift 2 ;;
-    --reasoning-effort|--permission-mode) shift 2 ;;
-    --no-subagents|--disable-web-search) shift ;;
+    --reasoning-effort) effort="$2"; shift 2 ;;
+    --permission-mode) mode="$2"; shift 2 ;;
+    --no-subagents) nosub="yes"; shift ;;
+    --disable-web-search) shift ;;
     --prompt-file) promptfile="$2"; shift 2 ;;
-    *) shift ;;
+    *) echo "mock grok: unexpected arg $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$promptfile" ] && [ -f "$promptfile" ] || { echo "mock grok: missing --prompt-file" >&2; exit 2; }
+missing=""
+[ -n "$model" ] || missing="$missing -m"
+[ -n "$effort" ] || missing="$missing --reasoning-effort"
+[ -n "$mode" ] || missing="$missing --permission-mode"
+[ -n "$nosub" ] || missing="$missing --no-subagents"
+{ [ -n "$promptfile" ] && [ -f "$promptfile" ]; } || missing="$missing --prompt-file"
+[ -z "$missing" ] || { echo "mock grok: missing:$missing" >&2; exit 2; }
 if grep -q 'MATERIAL UNDER AUDIT' "$promptfile"; then
   if grep -q 'INJECT_DEFECT' "$promptfile"; then
     printf 'Mock critique.\nVERDICT: DEFECT — planted defect\n'
@@ -951,7 +1118,7 @@ if grep -q 'MATERIAL UNDER AUDIT' "$promptfile"; then
     printf 'Mock critique.\nVERDICT: PASS\n'
   fi
 else
-  printf 'MOCK WORK OUTPUT (%s)\n' "${model:-unknown-model}"
+  printf 'MOCK WORK OUTPUT (%s)\n' "$model"
 fi
 exit 0
 ```
@@ -960,38 +1127,59 @@ exit 0
 
 ```bash
 #!/usr/bin/env bash
-# Verifies the mock CLIs accept the exact invocation shapes the relay
+# Verifies the mock CLIs enforce the exact invocation shapes the relay
 # agents use, so local mock-PATH pipeline runs exercise the real contract.
+# Model IDs here are deliberately arbitrary: the mocks echo whatever they
+# receive, so these checks never encode production model names.
 set -eu
 cd "$(dirname "$0")"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail=0
+cm="any-codex-model"
+gm="any-grok-model"
 
-# codex worker shape
+# codex worker shape (model echoed dynamically)
 printf 'do the thing' | ./mock-cli/codex exec --sandbox read-only --skip-git-repo-check \
-  -C "$tmp" -m gpt-5.6-terra -c model_reasoning_effort=high -o "$tmp/last.md" - >/dev/null
-grep -q 'MOCK WORK OUTPUT (gpt-5.6-terra)' "$tmp/last.md" || { echo "FAIL codex worker shape"; fail=1; }
+  -C "$tmp" -m "$cm" -c model_reasoning_effort=high -o "$tmp/last.md" - >/dev/null
+grep -q "MOCK WORK OUTPUT ($cm)" "$tmp/last.md" || { echo "FAIL codex worker shape"; fail=1; }
 
 # codex auditor shape (PASS and DEFECT)
 printf -- '--- MATERIAL UNDER AUDIT ---\nfine work' | ./mock-cli/codex exec --sandbox read-only \
-  --skip-git-repo-check -C "$tmp" -m gpt-5.6-sol -c model_reasoning_effort=high -o "$tmp/a.md" - >/dev/null
+  --skip-git-repo-check -C "$tmp" -m "$cm" -c model_reasoning_effort=high -o "$tmp/a.md" - >/dev/null
 grep -q 'VERDICT: PASS' "$tmp/a.md" || { echo "FAIL codex audit PASS"; fail=1; }
 printf -- '--- MATERIAL UNDER AUDIT ---\nINJECT_DEFECT' | ./mock-cli/codex exec --sandbox read-only \
-  --skip-git-repo-check -C "$tmp" -m gpt-5.6-sol -c model_reasoning_effort=high -o "$tmp/b.md" - >/dev/null
+  --skip-git-repo-check -C "$tmp" -m "$cm" -c model_reasoning_effort=high -o "$tmp/b.md" - >/dev/null
 grep -q 'VERDICT: DEFECT' "$tmp/b.md" || { echo "FAIL codex audit DEFECT"; fail=1; }
 
 # grok worker shape
 printf 'do the thing' > "$tmp/p.txt"
-out=$(./mock-cli/grok -m grok-4.5 --reasoning-effort high --permission-mode acceptEdits \
+out=$(./mock-cli/grok -m "$gm" --reasoning-effort high --permission-mode acceptEdits \
   --no-subagents --prompt-file "$tmp/p.txt")
-printf '%s' "$out" | grep -q 'MOCK WORK OUTPUT (grok-4.5)' || { echo "FAIL grok worker shape"; fail=1; }
+printf '%s' "$out" | grep -q "MOCK WORK OUTPUT ($gm)" || { echo "FAIL grok worker shape"; fail=1; }
 
 # grok auditor shape
 printf -- '--- MATERIAL UNDER AUDIT ---\nfine work' > "$tmp/q.txt"
-out=$(./mock-cli/grok -m grok-4.5 --reasoning-effort high --permission-mode plan \
+out=$(./mock-cli/grok -m "$gm" --reasoning-effort high --permission-mode plan \
   --no-subagents --disable-web-search --prompt-file "$tmp/q.txt")
 printf '%s' "$out" | grep -q 'VERDICT: PASS' || { echo "FAIL grok audit shape"; fail=1; }
+
+# negative: a missing required flag must fail
+if printf 'x' | ./mock-cli/codex exec --skip-git-repo-check -C "$tmp" -m "$cm" \
+  -c model_reasoning_effort=high -o "$tmp/neg.md" - >/dev/null 2>&1; then
+  echo "FAIL codex mock accepted a call missing --sandbox"; fail=1
+fi
+printf 'x' > "$tmp/neg.txt"
+if ./mock-cli/grok -m "$gm" --reasoning-effort high --no-subagents \
+  --prompt-file "$tmp/neg.txt" >/dev/null 2>&1; then
+  echo "FAIL grok mock accepted a call missing --permission-mode"; fail=1
+fi
+
+# forced failure injection must propagate the exit code
+if MOCK_CLI_EXIT=3 ./mock-cli/grok -m "$gm" --reasoning-effort high --permission-mode plan \
+  --no-subagents --prompt-file "$tmp/neg.txt" >/dev/null 2>&1; then
+  echo "FAIL grok mock ignored MOCK_CLI_EXIT"; fail=1
+fi
 
 [ "$fail" -eq 0 ] && echo "run-mock-checks.sh: all mock interface checks passed"
 exit "$fail"
@@ -1001,6 +1189,10 @@ exit "$fail"
 
 ```markdown
 # Smoke tests
+
+Both recipes pin `complexity` and `stakes` explicitly so routing — and
+therefore the expected call pattern — is deterministic, independent of
+triage judgment.
 
 ## Quota-free pipeline run (mock CLIs)
 
@@ -1014,20 +1206,23 @@ one task per lane with auditing on:
 
    ```json
    { "tasks": [
-       { "id": "smoke-codex", "prompt": "Summarize the numbers 1..5.", "lane": "codex-medium" },
-       { "id": "smoke-grok",  "prompt": "Summarize the letters a..e.", "lane": "grok" }
+       { "id": "smoke-codex", "prompt": "Summarize the numbers 1..5.", "lane": "codex-medium", "complexity": 3, "stakes": "low" },
+       { "id": "smoke-grok",  "prompt": "Summarize the letters a..e.", "lane": "grok", "complexity": 2, "stakes": "high" }
    ] }
    ```
 
-Expected: both items return `MOCK WORK OUTPUT (...)`, audits return
-`VERDICT: PASS`, `approved: true` for any item whose band ran an audit.
+Expected, exactly: `smoke-codex` runs 1 worker + 1 audit voice (the grok
+auditor — cross-family), `smoke-grok` runs 1 worker + the full 2-voice
+panel (high stakes). Five relay calls total. Both outputs read
+`MOCK WORK OUTPUT (...)`, every audit returns `VERDICT: PASS`, and both
+items end `approved: true`.
 
 ## Real-CLI smoke (uses subscription quota)
 
-Same invocation without the PATH override. Use trivial prompts. Expected:
-real model output, both audit voices return a VERDICT line, and the run
-report shows every item routed, audited, and approved or rejected —
-no WRAPPER-ERROR strings anywhere.
+Same invocation without the PATH override. Keep the prompts trivial.
+Expected: the same 2-worker + 3-audit call pattern, real model output, a
+VERDICT line from every voice, both items `approved: true` (or a DEFECT
+verdict with a concrete reason), and no WRAPPER-ERROR strings anywhere.
 ```
 
 - [ ] **Step 5: Run and commit**
@@ -1055,7 +1250,33 @@ git add -A && git commit -m "test: mock CLIs matching relay invocation shapes + 
 ```bash
 #!/usr/bin/env bash
 # Environment check for ultracode-xmodel: external CLIs, auth hints, models.
+# `xmodel-doctor --config` prints an args.config JSON snippet matching the
+# CLIs actually usable on this machine — pass it to the workflow on
+# degraded installs so lanes and auditors line up with reality.
 set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+wf="$root/skills/ultracode-xmodel/ultracode-xmodel.js"
+
+# "Usable" means present AND --version exits 0 — a broken install is not a CLI.
+codex_ok=0; grok_ok=0
+command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1 && codex_ok=1
+command -v grok  >/dev/null 2>&1 && grok --version  >/dev/null 2>&1 && grok_ok=1
+
+if [ "${1:-}" = "--config" ]; then
+  if [ "$codex_ok" -eq 1 ] && [ "$grok_ok" -eq 1 ]; then
+    echo '{}'
+  elif [ "$codex_ok" -eq 1 ]; then
+    echo '{ "lanes": { "grok": null }, "auditors": { "grok": null } }'
+  elif [ "$grok_ok" -eq 1 ]; then
+    echo '{ "lanes": { "codex-high": null, "codex-medium": null }, "auditors": { "codex": null } }'
+  else
+    echo '{}'
+    echo "no usable external CLI found" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
 ok=0; warn=0; bad=0
 pass() { echo "PASS  $1"; ok=$((ok+1)); }
 note() { echo "WARN  $1"; warn=$((warn+1)); }
@@ -1064,44 +1285,46 @@ fail() { echo "FAIL  $1"; bad=$((bad+1)); }
 echo "ultracode-xmodel doctor"
 echo "-----------------------"
 
-codex_ok=0
-if command -v codex >/dev/null 2>&1; then
-  v=$(codex --version 2>/dev/null | head -1)
-  pass "codex CLI found (${v:-version unknown})"
-  codex_ok=1
+if [ "$codex_ok" -eq 1 ]; then
+  pass "codex CLI usable ($(codex --version 2>/dev/null | head -1))"
   if [ -f "$HOME/.codex/auth.json" ]; then
     pass "codex auth file present (~/.codex/auth.json)"
   else
     note "codex auth file not found — run 'codex login' if calls fail"
   fi
-  if [ -f "$HOME/.codex/models_cache.json" ]; then
-    if grep -q 'gpt-5.6-terra' "$HOME/.codex/models_cache.json" 2>/dev/null; then
-      pass "default worker model gpt-5.6-terra known to codex"
-    else
-      note "gpt-5.6-terra not in codex models cache — update CONFIG.lanes if the model list changed"
-    fi
+  if [ -f "$HOME/.codex/models_cache.json" ] && [ -f "$wf" ]; then
+    # Check every codex model the workflow CONFIG references — the CONFIG
+    # is the single source of model IDs, never this script.
+    grep -o "MODEL: 'gpt-[^']*'" "$wf" | sed "s/MODEL: '//;s/'//" | sort -u | while read -r m; do
+      if grep -q "$m" "$HOME/.codex/models_cache.json" 2>/dev/null; then
+        echo "PASS  model $m known to codex"
+      else
+        echo "WARN  model $m not in codex models cache — update CONFIG if the model list changed"
+      fi
+    done
   else
-    note "codex models cache not found — model availability unverified"
+    note "codex models cache or workflow script not found — model availability unverified"
   fi
+elif command -v codex >/dev/null 2>&1; then
+  fail "codex CLI found but 'codex --version' failed — installation is broken"
 else
   note "codex CLI not found — codex lanes and the codex audit voice are unavailable"
 fi
 
-grok_ok=0
-if command -v grok >/dev/null 2>&1; then
-  v=$(grok --version 2>/dev/null | head -1)
-  pass "grok CLI found (${v:-version unknown})"
-  grok_ok=1
+if [ "$grok_ok" -eq 1 ]; then
+  pass "grok CLI usable ($(grok --version 2>/dev/null | head -1))"
+elif command -v grok >/dev/null 2>&1; then
+  fail "grok CLI found but 'grok --version' failed — installation is broken"
 else
   note "grok CLI not found — the grok lane and the grok audit voice are unavailable"
 fi
 
 if [ "$codex_ok" -eq 1 ] && [ "$grok_ok" -eq 1 ]; then
-  pass "both CLI families available — full cross-model audit panel"
+  pass "both CLI families usable — full cross-model audit panel"
 elif [ "$codex_ok" -eq 1 ] || [ "$grok_ok" -eq 1 ]; then
-  note "single CLI family — audits degrade to one voice and lose cross-model independence"
+  note "single CLI family — run 'xmodel-doctor --config' and pass the output as the workflow's config argument"
 else
-  fail "no external CLI found — install the Codex CLI and/or the Grok CLI"
+  fail "no usable external CLI — install the Codex CLI and/or the Grok CLI"
 fi
 
 echo "-----------------------"
@@ -1268,8 +1491,10 @@ task, then re-run just those items.
 ## Prerequisites
 
 Codex CLI and/or Grok CLI installed and authenticated. Run `xmodel-doctor`
-(ships with the plugin) to verify. With a single CLI family installed the
-panel degrades to one voice and the run log says so.
+(ships with the plugin) to verify. With a single CLI family installed, run
+`xmodel-doctor --config` and pass its output as the `config` option so
+lanes and audit voices match what is actually available; the panel then
+runs with one voice and the run log says so.
 ```
 
 - [ ] **Step 2: Verify frontmatter + commit**
@@ -1405,9 +1630,9 @@ text instead — the workflow already does this.
 - **Workers default to read-only.** A task must explicitly request
   `sandbox: workspace-write` before its lane may edit files, and the
   relay confines writes to the task's `dir` and `/tmp`.
-- **Relays are mechanical.** Each relay performs exactly one CLI
-  invocation per task, never calls MCP servers or the web itself, and
-  returns output verbatim.
+- **Relays are mechanical.** Each relay makes at most two CLI invocations
+  per task (one call, plus at most one retry on clearly transient errors),
+  never calls MCP servers or the web itself, and returns output verbatim.
 
 ## Input sanitization
 
@@ -1421,10 +1646,16 @@ smuggling (for example, a newline in `dir` injecting an extra
 ## Prompt-injection blast radius
 
 Worker output is untrusted model output, and it is fed to the audit
-panel. The panel is confined: read-only execution, no web access, and its
-only channel back to the caller is critique text whose `VERDICT:` line is
-parsed with a fixed pattern. A malicious worker output can at worst
-mislabel itself — it cannot make an auditor modify state.
+panel. The panel's confinement is layered: read-only execution on both
+voices, web search disabled on the Grok voice, and external tools
+instructed off on the Codex voice (plus a config-level MCP disable on the
+audit invocation where the Codex CLI supports one — if your Codex CLI has
+MCP servers configured and no such override, those remain reachable by
+Codex itself; remove them from its config if that matters in your threat
+model). The expected channel back to the caller is critique text whose
+`VERDICT:` line is parsed with a fixed pattern. A malicious worker output
+can at worst mislabel itself — it cannot make an auditor modify workspace
+state.
 
 ## Credentials
 
@@ -1638,7 +1869,10 @@ via `CONFIG.auditors`.
 The workflow states its compromises in the run log rather than hiding
 them: a missing CLI family drops the panel to one voice (and says so), a
 single-voice audit that cannot find a cross-family auditor says it used a
-same-family voice, and skipped audits are logged per task.
+same-family voice, roles healed onto an available lane are logged, and
+skipped audits are logged per task. On a single-CLI machine, run
+`xmodel-doctor --config` and pass its output as `config` so the routing
+table matches what is installed.
 
 ## Troubleshooting & security
 
@@ -1695,11 +1929,11 @@ git add docs/assets && git commit -m "docs: banner artwork"
 Run: `node test/harness.mjs && bash test/check.sh && bash test/run-mock-checks.sh`
 Expected: all green.
 
-- [ ] **Step 2: Plugin fresh-install test.** In a Claude Code session: `/plugin marketplace add /Users/pablo/Projects/ultracode-xmodel` then `/plugin install ultracode-xmodel`. Restart the session. Verify the four agents resolve with the `ultracode-xmodel:` prefix (spawn `ultracode-xmodel:codex-worker` with a trivial directive-only task) and that the skill loads and points at the co-located script.
+- [ ] **Step 2: Plugin fresh-install test in a clean sandbox.** Launch a Claude Code session with an empty config sandbox — `CLAUDE_CONFIG_DIR=$(mktemp -d) claude` (verify the exact env var/CLI surface of the installed Claude Code version at execution time and record what was used). In that session: `/plugin marketplace add /Users/pablo/Projects/ultracode-xmodel`, `/plugin install ultracode-xmodel`, restart the sandbox session, then verify the four agents resolve with the `ultracode-xmodel:` prefix (spawn `ultracode-xmodel:codex-worker` with a trivial directive-only task) and the skill loads pointing at its co-located script. The sandbox guarantees nothing from the developer machine's `~/.claude` (private agents, cached plugins) can mask a packaging gap.
 
-- [ ] **Step 3: Mock pipeline run.** Follow `test/SMOKE.md` mock section exactly. Expected: both items complete, routed per their labels, mock verdicts parsed, `approved` fields correct.
+- [ ] **Step 3: Mock pipeline run.** Follow `test/SMOKE.md` mock section exactly. Expected: the exact 5-call pattern (2 workers, 3 audit voices), mock verdicts parsed, both items `approved: true`.
 
-- [ ] **Step 4: Real smoke.** Follow `test/SMOKE.md` real section (two trivial tasks, one per family, audit on). Expected: real outputs, four relay calls total at most (2 work + up to 2 audit), no WRAPPER-ERROR, run report consistent. This uses subscription quota — keep prompts trivial.
+- [ ] **Step 4: Real smoke.** Follow `test/SMOKE.md` real section (same two explicitly-labeled tasks, audit on). Expected: the same 2-worker + 3-audit pattern, no WRAPPER-ERROR, both items approved (or a concrete DEFECT). This uses subscription quota — keep prompts trivial.
 
 - [ ] **Step 5: `bin/xmodel-doctor`** — expected exit 0 with both families PASS.
 
@@ -1740,3 +1974,9 @@ git add -A && git commit -m "fix: cross-model review findings"
 - **Spec coverage:** §2 distribution → Tasks 1, 8, 13; §3 layout → Tasks 1–11; §4 effort layer → Tasks 3–4; §5 config lanes/degradation → Tasks 4, 6; §6 security → Tasks 4 (BAD_PATH), 10; §7 README/diagrams/assets/voice → Tasks 11–12; §8 testing/CI → Tasks 3, 5, 9; §9 gate → Tasks 13–15; §10 troubleshooting → Task 10; §12 migration → Task 15. PNG fallbacks for Mermaid (spec §7) intentionally dropped: GitHub renders Mermaid natively and the fallbacks add asset drift risk — deviation noted for Pablo's review.
 - **Type consistency:** `agentType` = `cfg.agentPrefix + agent name`; scenario regexes match suffixes so they hold for any prefix; harness responder keys use the plugin-prefixed auditor name in the DEFECT scenario, matching the default CONFIG prefix. `approved: null` semantics consistent across Task 4 code, Task 8 SKILL.md, and Task 11 README.
 - **Placeholder scan:** clean — every file's full content is in its task; the only deliberately deferred content is the image asset (user-gated) and observed-CLI adjustments in doctor (explicit verify step with a stated fallback rule).
+
+## Codex review amendments (2026-07-14)
+
+A pre-execution adversarial review (Codex gpt-5.6, 17 findings) was applied to this plan. Disposition:
+
+1. Grok lane ignored `sandbox` and defaulted write-enabled → lane-level sandbox→MODE mapping, grok-worker default MODE now `plan`, scenario added. 2. No degradation path without manual config → role healing on removed lanes + `xmodel-doctor --config` emitter + SKILL/README guidance, scenario added. 3. Malformed triage entries accepted → per-entry validation + try/catch around the triage call, scenario added. 4. Unknown explicit lane silently rerouted → rejected instead, scenario added. 5. Misleading fail-safe metadata on audit-off tasks → band `null`/source `explicit`, scenario updated. 6. `PASSING` parsed as PASS → negative lookahead in verdict regex, scenario added. 7. Mid-text WRAPPER-ERROR mention treated as failure → start-anchored sentinel check, scenario added. 8. Null-worker result contract untested → scenario added. 9. Permissive mocks / no CI pipeline e2e → mocks now enforce exact flag shapes with negative tests + MOCK_CLI_EXIT injection; a CI run of the real Workflow runtime is not possible (requires a Claude Code session), covered locally by Task 13's mock pipeline run — accepted limitation, stated here. 10. Doctor passed on broken CLIs → usable = `--version` exits 0; broken installs FAIL. 11. Smoke recipe non-deterministic and Task 13 counts wrong → explicit complexity/stakes labels, exact 5-call pattern. 12. Spec/plan installer destination conflict → spec §2 corrected to the skill-dir design. 13. Fresh-install test not clean → CLAUDE_CONFIG_DIR sandbox session. 14. Missing meta-literal lint → added to check.sh (best-effort literal evaluation). 15. Model IDs hardcoded in doctor/mock checks → doctor derives models from CONFIG; mock checks use arbitrary IDs. 16. SECURITY.md overclaims (MCP reachability, "exactly one invocation") → wording corrected; codex-auditor step gains an MCP-disable investigation note. 17. check.sh mktemp leak → tmpdir pattern.
