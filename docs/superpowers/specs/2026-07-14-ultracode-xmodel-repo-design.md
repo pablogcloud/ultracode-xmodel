@@ -113,6 +113,8 @@ Carried forward and documented in SECURITY.md:
 
 README sections: what/why (cross-model adversarial execution, orchestrator spends ~0 Claude tokens on reasoning), how it works, quickstart, args contract with examples, effort-layer explanation (the mapping table), configuration, degraded modes, FAQ, troubleshooting pointer.
 
+Voice (applies to ALL shipped files — README, SKILL.md, docs/, code comments): professional public open-source tone, written like a polished GitHub project. State how the system works and how to use it; never narrate platform gaps, workarounds, internal history, or what the repo does not contain (e.g. no "plugins can't ship workflows, so..." explanations — the install and invocation instructions simply ARE the way it works). Rationale and meta-notes live only in this spec, not in shipped files.
+
 Mermaid diagrams (render natively on GitHub; exported PNG fallbacks in docs/assets/):
 1. **Architecture**: orchestrator → workflow script → relay agents (haiku) → external CLIs → audit panel → approved/rejected.
 2. **Effort flow**: tasks → batch triage → mapping table → lane/effort/audit-depth assignment.
