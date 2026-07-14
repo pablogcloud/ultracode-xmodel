@@ -87,6 +87,31 @@ for (const key of ['lanes', 'roles', 'auditors']) {
     return { error: `config.${key} must be an object` }
   }
 }
+// Every directive value is emitted as a `KEY: value` line and interpolated
+// unquoted into the relay's CLI command. A newline could smuggle an extra
+// directive; a shell metacharacter could inject a command. Reject either in
+// any configured lane/auditor directive (config is caller-supplied too).
+const DIRECTIVE_UNSAFE = /[\n\r;|&'"`$()<>]/
+for (const group of ['lanes', 'auditors']) {
+  for (const name of Object.keys(cfg[group])) {
+    const entry = cfg[group][name]
+    const dirs = (entry && entry.directives) || {}
+    for (const k of Object.keys(dirs)) {
+      if (DIRECTIVE_UNSAFE.test(String(dirs[k]))) {
+        return { error: `config.${group}.${name}.directives.${k} contains unsafe characters` }
+      }
+    }
+    if (entry && entry.sandbox) {
+      for (const sb of Object.keys(entry.sandbox)) {
+        for (const k of Object.keys(entry.sandbox[sb])) {
+          if (DIRECTIVE_UNSAFE.test(String(entry.sandbox[sb][k]))) {
+            return { error: `config.${group}.${name}.sandbox.${sb}.${k} contains unsafe characters` }
+          }
+        }
+      }
+    }
+  }
+}
 // Dropping an auditor or lane via config (e.g. { auditors: { grok: null } })
 // leaves a null entry; remove them, then heal any role that pointed at a
 // removed lane so a degraded install still routes to what exists.
@@ -106,6 +131,9 @@ for (const role of Object.keys(cfg.roles)) {
 // inject extra directive lines.
 const BAD_PATH = /[\n\r;|&'"`$]/
 const SANDBOXES = ['read-only', 'workspace-write']
+// Worker effort is interpolated unquoted into `model_reasoning_effort=<EFFORT>`;
+// accept only the known token set so a caller cannot inject shell text.
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 // Caller errors are rejected, never guessed around: routing state is keyed
 // by id (duplicates would silently corrupt it), and an invalid explicit
 // complexity/stakes would otherwise band LOW — a silent downgrade.
@@ -119,7 +147,7 @@ function rejectionOf(t) {
   if (!(typeof t.prompt === 'string' && t.prompt.trim())) return 'rejected: prompt must be a non-empty string'
   if (t.complexity != null && !(Number.isInteger(t.complexity) && t.complexity >= 1 && t.complexity <= 5)) return 'rejected: invalid explicit complexity (integer 1-5)'
   if (t.stakes != null && t.stakes !== 'low' && t.stakes !== 'high') return 'rejected: invalid explicit stakes ("low"|"high")'
-  if (t.effort != null && typeof t.effort !== 'string') return 'rejected: invalid explicit effort'
+  if (t.effort != null && !EFFORTS.includes(t.effort)) return 'rejected: invalid explicit effort (low|medium|high|xhigh|max)'
   if ((t.dir && BAD_PATH.test(String(t.dir))) || (t.sandbox && !SANDBOXES.includes(t.sandbox))) return 'rejected: dir contains shell/quote/newline characters, or sandbox is not read-only|workspace-write'
   if (t.lane && !cfg.lanes[t.lane]) return `rejected: unknown lane "${t.lane}"`
   return null
@@ -251,12 +279,19 @@ function auditPrompt(t, auditor, output) {
 // a mention of the sentinel elsewhere in ordinary text is not a failure.
 const isWrapperError = s => typeof s === 'string' && /^\s*(CODEX|GROK)-WRAPPER-ERROR:/.test(s)
 
+const VERDICT_LINE = /^\s*VERDICT:\s*(PASS|DEFECT|NO-VERDICT)(?![A-Za-z])\s*[—-]?\s*(.*)$/i
+
 function verdictOf(text) {
   if (typeof text !== 'string' || !text.trim()) return { verdict: 'ERROR', detail: 'auditor returned nothing' }
   if (isWrapperError(text)) return { verdict: 'ERROR', detail: text.slice(0, 300) }
-  const all = [...text.matchAll(/VERDICT:\s*(PASS|DEFECT|NO-VERDICT)(?![A-Za-z])\s*[—-]?\s*([^\n]*)/gi)]
-  if (!all.length) return { verdict: 'NO-VERDICT', detail: text.slice(-400) }
-  const m = all[all.length - 1]
+  // The verdict is only trusted on the auditor's FINAL non-empty line — the
+  // contract's position for it, and the relay's NO-VERDICT fallback always
+  // lands there. A `VERDICT:` string quoted mid-critique (e.g. echoing the
+  // worker's own claim) therefore cannot be read as the auditor's verdict.
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  const last = lines[lines.length - 1] || ''
+  const m = last.match(VERDICT_LINE)
+  if (!m) return { verdict: 'NO-VERDICT', detail: text.slice(-400) }
   return { verdict: m[1].toUpperCase(), detail: (m[2] || '').trim() }
 }
 
@@ -279,23 +314,40 @@ function voicesFor(t) {
 // ------------------------------ execute --------------------------------
 const results = await pipeline(
   runnable,
-  (t) => agent(workerPrompt(t), {
-    label: `work:${t.id}:${routes[t.id].laneName}`,
-    phase: 'Work',
-    agentType: cfg.agentPrefix + cfg.lanes[routes[t.id].laneName].agent,
-    effort: 'low',
-  }),
-  async (output, t) => {
+  // A throw in worker dispatch would otherwise drop the item to null and it
+  // would vanish from the report; capture it as a failed result instead.
+  (t) => Promise.resolve()
+    .then(() => agent(workerPrompt(t), {
+      label: `work:${t.id}:${routes[t.id].laneName}`,
+      phase: 'Work',
+      agentType: cfg.agentPrefix + cfg.lanes[routes[t.id].laneName].agent,
+      effort: 'low',
+    }))
+    .then(output => ({ output }), err => ({ threw: (err && err.message) || 'worker dispatch threw' })),
+  async (res, t) => {
     const r = routes[t.id]
     const base = { id: t.id, lane: r.laneName, effort: r.effort, band: r.band, source: r.source }
+    if (res && res.threw) return { ...base, output: null, approved: false, error: res.threw }
+    const output = res ? res.output : null
     if (output == null) return { ...base, output: null, approved: false, error: 'worker returned null (skipped or died)' }
     if (isWrapperError(output)) {
       return { ...base, output, approved: false, error: 'worker lane failed — see output' }
     }
+    // Empty successful output is not something to audit and approve — a
+    // relay that produced nothing usable is a failure.
+    if (typeof output === 'string' && !output.trim()) {
+      return { ...base, output, approved: false, error: 'worker returned empty output' }
+    }
     const voices = voicesFor(t)
     if (!voices.length) {
-      if (doAudit && r.audit === 'none') log(`audit skipped for ${t.id} (band=${r.band})`)
-      return { ...base, output, approved: null }
+      if (r.audit === 'none') {
+        if (doAudit) log(`audit skipped for ${t.id} (band=${r.band})`)
+        return { ...base, output, approved: null }
+      }
+      // An audit was required (mid/high band) but no voice could run — that
+      // is a failed safety gate, not an intentional skip. Never approve.
+      log(`audit REQUIRED for ${t.id} (audit=${r.audit}) but no auditor available — marking not approved`)
+      return { ...base, output, approved: false, error: `audit required (${r.audit}) but no auditor available` }
     }
     const votes = await parallel(voices.map(id => () =>
       agent(auditPrompt(t, cfg.auditors[id], output), {
