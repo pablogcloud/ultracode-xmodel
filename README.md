@@ -117,11 +117,15 @@ sequenceDiagram
 
 ## Requirements
 
-- Claude Code with the Workflow tool.
-- [Codex CLI](https://github.com/openai/codex) and/or a Grok CLI, installed
-  and authenticated. Both give you the full cross-model panel; one alone
-  runs in a reduced single-voice mode.
-- Node ≥ 18 only if you want to run the test suite.
+- Claude Code 2.1 or later with the Workflow tool (in a session, ask
+  Claude to list its tools — Workflow must be among them).
+- [Codex CLI](https://github.com/openai/codex) and/or the xAI
+  [Grok CLI](https://docs.x.ai/build/overview) (install:
+  `curl -fsSL https://x.ai/cli/install.sh | bash`, verify:
+  `grok --version`), installed and authenticated. Both give you the full
+  cross-model panel; one alone runs in a reduced single-voice mode.
+- Node ≥ 18 only if you want to run the test suite:
+  `node test/harness.mjs && bash test/check.sh && bash test/run-mock-checks.sh`.
 
 ## Install
 
@@ -135,6 +139,9 @@ sequenceDiagram
 **Manual:** clone the repo and run `./install.sh` (user-wide) or
 `./install.sh --project` (current repo only).
 
+New agents and skills register at session start — restart your Claude Code
+session after installing.
+
 Then verify your environment:
 
 ```
@@ -144,7 +151,10 @@ bin/xmodel-doctor
 ## Quickstart
 
 Ask Claude Code to use the `ultracode-xmodel` skill, or invoke the Workflow
-tool directly with the script that ships in the skill directory:
+tool directly with
+`scriptPath: "<install dir>/skills/ultracode-xmodel/ultracode-xmodel.js"`
+and the args below (plugin installs: the script lives in the plugin's
+skill directory; the skill prints its base directory when it loads):
 
 ```json
 {
@@ -184,7 +194,14 @@ single-voice audit that cannot find a cross-family auditor says it used a
 same-family voice, roles healed onto an available lane are logged, and
 skipped audits are logged per task. On a single-CLI machine, run
 `xmodel-doctor --config` and pass its output as `config` so the routing
-table matches what is installed.
+table matches what is installed:
+
+```
+$ bin/xmodel-doctor --config
+{ "lanes": { "grok": null }, "auditors": { "grok": null } }
+```
+
+Pass that object as the `config` value in your Workflow args.
 
 ## Troubleshooting & security
 
