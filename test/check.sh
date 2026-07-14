@@ -27,12 +27,20 @@ for f in agents/codex-auditor.md agents/grok-auditor.md; do
 done
 
 # --- Relay temp-file contract (private per-run dirs, cleanup, verbatim) ---
+# NOTE: this is a STATIC token check. Relay agents are LLM-executed prose
+# that CI cannot run — this lint verifies required safety properties are
+# PRESENT in the text but cannot verify they are executed correctly at
+# runtime; the mock pipeline (test/SMOKE.md) is the execution test.
 relay_check_common() {
   f="$1"
   grep -q 'mktemp -d' "$f" || err "$f: relay must create a private dir with mktemp -d"
   grep -q 'rm -rf' "$f" || err "$f: relay must clean up its private dir with rm -rf"
   grep -Eq 'metacharacters' "$f" || err "$f: relay must refuse DIR containing shell metacharacters"
   grep -Eq 'VERBATIM|byte-for-byte' "$f" || err "$f: relay must return output VERBATIM/byte-for-byte"
+  if ! { grep -qi 'unquoted' "$f" && grep -q 'MODEL' "$f"; }; then
+    err "$f: relay must constrain unquoted directives (MODEL/EFFORT/SANDBOX/MODE) to a safe character set"
+  fi
+  grep -Eq 'letters, digits' "$f" || err "$f: relay must spell out the safe-character-set refusal (letters, digits, dot, dash, underscore, slash) for unquoted directives"
 }
 for f in agents/codex-worker.md agents/codex-auditor.md; do
   [ -f "$f" ] || continue

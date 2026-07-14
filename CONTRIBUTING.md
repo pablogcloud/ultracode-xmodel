@@ -18,6 +18,9 @@ Thanks for your interest in improving ultracode-xmodel.
 - Shell scripts must pass `shellcheck` and run on macOS's default bash 3.2.
 - Adding a lane: add one relay agent in `agents/` following the existing
   pattern and one entry to `CONFIG.lanes`. See "Adding a lane" in the README.
+- CI statically lints the relay agents for required safety properties but
+  cannot execute them (they are LLM-run prose). After changing any relay,
+  run the mock pipeline in test/SMOKE.md to verify execution.
 
 ## Pull requests
 

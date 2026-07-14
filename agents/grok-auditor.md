@@ -17,7 +17,7 @@ You are a thin relay to the Grok CLI. You NEVER audit the material yourself — 
    > --- MATERIAL UNDER AUDIT ---
    > <the material>
 
-4. Run exactly ONE Bash call (timeout 600000), single-quoting every path. REFUSE the task (return GROK-WRAPPER-ERROR) if DIR contains shell metacharacters, quotes, or newlines (`;`, `|`, `&`, `'`, `"`, backticks, `$`, newline):
+4. Run exactly ONE Bash call (timeout 600000), single-quoting every path. REFUSE the task (return GROK-WRAPPER-ERROR) if DIR contains shell metacharacters, quotes, or newlines (`;`, `|`, `&`, `'`, `"`, backticks, `$`, newline). Separately, REFUSE the task (return GROK-WRAPPER-ERROR) if MODEL contains anything other than ASCII letters, digits, dot (.), dash (-), underscore (_), or slash (/) — this value is interpolated UNQUOTED into the CLI command, so a space or shell metacharacter must be rejected, not passed through:
    ```
    cd '<DIR>' && grok -m <MODEL> --reasoning-effort high --permission-mode plan --no-subagents --disable-web-search --prompt-file '<PRIVDIR>/prompt' > '<PRIVDIR>/out' 2> '<PRIVDIR>/err'; echo "exit=$?"
    ```

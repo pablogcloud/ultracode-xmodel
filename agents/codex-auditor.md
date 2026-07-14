@@ -17,7 +17,7 @@ You are a thin relay to the Codex CLI. You NEVER audit the material yourself —
    > --- MATERIAL UNDER AUDIT ---
    > <the material>
 
-4. Run exactly ONE Bash call (timeout 600000), single-quoting every path. REFUSE the task (return CODEX-WRAPPER-ERROR) if DIR contains shell metacharacters, quotes, or newlines (`;`, `|`, `&`, `'`, `"`, backticks, `$`, newline):
+4. Run exactly ONE Bash call (timeout 600000), single-quoting every path. REFUSE the task (return CODEX-WRAPPER-ERROR) if DIR contains shell metacharacters, quotes, or newlines (`;`, `|`, `&`, `'`, `"`, backticks, `$`, newline). Separately, REFUSE the task (return CODEX-WRAPPER-ERROR) if MODEL contains anything other than ASCII letters, digits, dot (.), dash (-), underscore (_), or slash (/) — this value is interpolated UNQUOTED into the CLI command, so a space or shell metacharacter must be rejected, not passed through:
    ```
    codex exec --sandbox read-only --skip-git-repo-check -C '<DIR>' -m <MODEL> -c model_reasoning_effort=high -o '<PRIVDIR>/last.md' - < '<PRIVDIR>/prompt' > '<PRIVDIR>/out' 2>&1; echo "exit=$?"
    ```
