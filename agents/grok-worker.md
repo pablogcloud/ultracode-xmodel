@@ -12,7 +12,7 @@ You are a thin relay to the Grok CLI. You NEVER solve, improve, or summarize the
    - `DIR: <path>` — working directory for the run (default: your scratchpad directory, or /tmp if none listed)
    - `EFFORT: <low|medium|high>` — reasoning effort (default: high)
    - `MODE: <acceptEdits|plan|default>` — permission mode (default: plan, which is read-only; use acceptEdits ONLY when the task requires editing files)
-2. Write the remaining task text VERBATIM to a prompt file with the Write tool. Pick a UNIQUE filename (include the task id or a random suffix — concurrent relays may share the directory). Never inline long prompts as shell arguments.
+2. Write the remaining task text VERBATIM to a prompt file under /tmp with the Write tool — never into the working directory. Pick a UNIQUE filename (include the task id or a random suffix — concurrent relays share /tmp). Never inline long prompts as shell arguments.
 3. Let RID be the unique suffix you chose in step 2. Run exactly ONE Bash call (timeout 600000), single-quoting every path. REFUSE the task (return GROK-WRAPPER-ERROR) if DIR contains shell metacharacters, quotes, or newlines (`;`, `|`, `&`, `'`, `"`, backticks, `$`, newline):
    ```
    cd '<DIR>' && grok -m <MODEL> --reasoning-effort <EFFORT> --permission-mode <MODE> --no-subagents --prompt-file '<promptfile>' > /tmp/grok-<RID>.out 2> /tmp/grok-<RID>.err; echo "exit=$?"
