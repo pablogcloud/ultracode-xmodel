@@ -1,0 +1,11 @@
+{
+  "name": "ultracode-xmodel",
+  "owner": { "name": "FORMM Labs", "url": "https://formm.mx" },
+  "plugins": [
+    {
+      "name": "ultracode-xmodel",
+      "source": "./",
+      "description": "Cross-model task execution with effort routing and an adversarial audit panel."
+    }
+  ]
+}
