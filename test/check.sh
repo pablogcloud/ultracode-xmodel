@@ -28,10 +28,18 @@ done
 
 # --- Workflow JS syntax + meta literal (present from Task 4 on) ---
 if [ -f skills/ultracode-xmodel/ultracode-xmodel.js ]; then
-  tmpdir=$(mktemp -d)
-  cp skills/ultracode-xmodel/ultracode-xmodel.js "$tmpdir/wf.mjs"
-  node --check "$tmpdir/wf.mjs" || err "workflow script has a syntax error"
-  rm -rf "$tmpdir"
+  # Workflow scripts run inside an async wrapper with top-level `return`,
+  # so they are not standalone modules — compile them the same way the
+  # runtime (and test/harness.mjs) does instead of `node --check`.
+  node -e '
+    const fs = require("fs");
+    const body = fs.readFileSync("skills/ultracode-xmodel/ultracode-xmodel.js", "utf8")
+      .replace(/^export /m, "");
+    try {
+      new Function("args", "agent", "parallel", "pipeline", "phase", "log", "budget",
+        "return (async () => { " + body + " })()");
+    } catch (e) { console.error("workflow syntax error: " + e.message); process.exit(1); }
+  ' || err "workflow syntax error"
   # Best-effort meta lint: the meta block must evaluate as a bare object
   # literal (free identifiers throw) and carry name + description strings.
   node -e '
