@@ -7,7 +7,11 @@ set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
 wf="$root/skills/ultracode-xmodel/ultracode-xmodel.js"
 
-# "Usable" means present AND --version exits 0 — a broken install is not a CLI.
+# "Usable" here means present AND --version exits 0 — enough to distinguish a
+# broken install from a working binary. It does NOT confirm live authentication;
+# an expired login still reports usable and only fails on the first real call
+# (the workflow surfaces that as a WRAPPER-ERROR). Auth is heuristically hinted
+# below where a cheap signal exists.
 codex_ok=0; grok_ok=0
 command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1 && codex_ok=1
 command -v grok  >/dev/null 2>&1 && grok --version  >/dev/null 2>&1 && grok_ok=1
@@ -44,14 +48,16 @@ if [ "$codex_ok" -eq 1 ]; then
   fi
   if [ -f "$HOME/.codex/models_cache.json" ] && [ -f "$wf" ]; then
     # Check every codex model the workflow CONFIG references — the CONFIG
-    # is the single source of model IDs, never this script.
-    grep -o "MODEL: 'gpt-[^']*'" "$wf" | sed "s/MODEL: '//;s/'//" | sort -u | while read -r m; do
+    # is the single source of model IDs, never this script. Process
+    # substitution (not a pipe) so pass()/note() run in this shell and the
+    # summary counters actually include these checks.
+    while read -r m; do
       if grep -q "$m" "$HOME/.codex/models_cache.json" 2>/dev/null; then
-        echo "PASS  model $m known to codex"
+        pass "model $m known to codex"
       else
-        echo "WARN  model $m not in codex models cache — update CONFIG if the model list changed"
+        note "model $m not in codex models cache — update CONFIG if the model list changed"
       fi
-    done
+    done < <(grep -o "MODEL: 'gpt-[^']*'" "$wf" | sed "s/MODEL: '//;s/'//" | sort -u)
   else
     note "codex models cache or workflow script not found — model availability unverified"
   fi
@@ -78,6 +84,9 @@ else
 fi
 
 echo "-----------------------"
+echo "Note: this checks that CLIs are installed and runnable, not that their"
+echo "logins are current — a usable CLI can still fail its first call on"
+echo "expired auth. Re-run 'codex login' / 'grok' interactively if that happens."
 echo "$ok passed, $warn warnings, $bad failures"
 [ "$bad" -eq 0 ] || exit 1
 exit 0

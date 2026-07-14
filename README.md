@@ -159,14 +159,17 @@ skill directory; the skill prints its base directory when it loads):
 ```json
 {
   "tasks": [
-    { "id": "rename-flag", "prompt": "In /path/to/repo, rename the CLI flag --colour to --color across src/ and update the help text. Self-contained: list changed files at the end.", "dir": "/path/to/repo", "sandbox": "workspace-write" },
-    { "id": "audit-auth",  "prompt": "Review /path/to/repo/src/auth/session.ts for token-lifetime and invalidation bugs. Report findings with file:line references.", "stakes": "high" }
+    { "id": "summarize-readme", "prompt": "Read /path/to/repo/README.md and return a 5-bullet summary of what the project does. Read-only.", "dir": "/path/to/repo" },
+    { "id": "audit-auth",       "prompt": "Review /path/to/repo/src/auth/session.ts for token-lifetime and invalidation bugs. Report findings with file:line references.", "stakes": "high" }
   ]
 }
 ```
 
-`rename-flag` will triage as low complexity — cheap lane, no audit.
-`audit-auth` is explicitly high stakes — strongest lane, full panel.
+`summarize-readme` is a trivial read-only task — triage scores it low, so it
+runs on the cheap lane with no audit. `audit-auth` is explicitly high stakes —
+strongest lane, full two-voice panel. (An in-place, `workspace-write` change to
+working code triages *high* by design — the routing treats modifying a working
+system as high-stakes, so such tasks always get the panel.)
 
 Each result returns `output`, the routing that was applied, per-voice audit
 verdicts, and `approved: true | false | null` (null = audit skipped).
