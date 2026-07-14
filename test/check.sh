@@ -26,6 +26,27 @@ for f in agents/codex-auditor.md agents/grok-auditor.md; do
   grep -q 'VERDICT: NO-VERDICT' "$f" || err "$f: NO-VERDICT fallback missing"
 done
 
+# --- Relay temp-file contract (private per-run dirs, cleanup, verbatim) ---
+relay_check_common() {
+  f="$1"
+  grep -q 'mktemp -d' "$f" || err "$f: relay must create a private dir with mktemp -d"
+  grep -q 'rm -rf' "$f" || err "$f: relay must clean up its private dir with rm -rf"
+  grep -Eq 'metacharacters' "$f" || err "$f: relay must refuse DIR containing shell metacharacters"
+  grep -Eq 'VERBATIM|byte-for-byte' "$f" || err "$f: relay must return output VERBATIM/byte-for-byte"
+}
+for f in agents/codex-worker.md agents/codex-auditor.md; do
+  [ -f "$f" ] || continue
+  relay_check_common "$f"
+  grep -q -- '--sandbox' "$f" || err "$f: relay must pass --sandbox"
+done
+for f in agents/grok-worker.md agents/grok-auditor.md; do
+  [ -f "$f" ] || continue
+  relay_check_common "$f"
+  grep -q -- '--permission-mode' "$f" || err "$f: relay must pass --permission-mode"
+done
+grep -q 'read-only' agents/codex-auditor.md || err "agents/codex-auditor.md: auditor must run sandbox read-only"
+grep -q 'plan' agents/grok-auditor.md || err "agents/grok-auditor.md: auditor must run permission-mode plan"
+
 # --- Workflow JS syntax + meta literal (present from Task 4 on) ---
 if [ -f skills/ultracode-xmodel/ultracode-xmodel.js ]; then
   # Workflow scripts run inside an async wrapper with top-level `return`,
