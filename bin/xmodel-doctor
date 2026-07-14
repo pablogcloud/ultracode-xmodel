@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Environment check for ultracode-xmodel: external CLIs, auth hints, models.
+# `xmodel-doctor --config` prints an args.config JSON snippet matching the
+# CLIs actually usable on this machine — pass it to the workflow on
+# degraded installs so lanes and auditors line up with reality.
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+wf="$root/skills/ultracode-xmodel/ultracode-xmodel.js"
+
+# "Usable" means present AND --version exits 0 — a broken install is not a CLI.
+codex_ok=0; grok_ok=0
+command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1 && codex_ok=1
+command -v grok  >/dev/null 2>&1 && grok --version  >/dev/null 2>&1 && grok_ok=1
+
+if [ "${1:-}" = "--config" ]; then
+  if [ "$codex_ok" -eq 1 ] && [ "$grok_ok" -eq 1 ]; then
+    echo '{}'
+  elif [ "$codex_ok" -eq 1 ]; then
+    echo '{ "lanes": { "grok": null }, "auditors": { "grok": null } }'
+  elif [ "$grok_ok" -eq 1 ]; then
+    echo '{ "lanes": { "codex-high": null, "codex-medium": null }, "auditors": { "codex": null } }'
+  else
+    echo '{}'
+    echo "no usable external CLI found" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+ok=0; warn=0; bad=0
+pass() { echo "PASS  $1"; ok=$((ok+1)); }
+note() { echo "WARN  $1"; warn=$((warn+1)); }
+fail() { echo "FAIL  $1"; bad=$((bad+1)); }
+
+echo "ultracode-xmodel doctor"
+echo "-----------------------"
+
+if [ "$codex_ok" -eq 1 ]; then
+  pass "codex CLI usable ($(codex --version 2>/dev/null | head -1))"
+  if [ -f "$HOME/.codex/auth.json" ]; then
+    pass "codex auth file present (~/.codex/auth.json)"
+  else
+    note "codex auth file not found — run 'codex login' if calls fail"
+  fi
+  if [ -f "$HOME/.codex/models_cache.json" ] && [ -f "$wf" ]; then
+    # Check every codex model the workflow CONFIG references — the CONFIG
+    # is the single source of model IDs, never this script.
+    grep -o "MODEL: 'gpt-[^']*'" "$wf" | sed "s/MODEL: '//;s/'//" | sort -u | while read -r m; do
+      if grep -q "$m" "$HOME/.codex/models_cache.json" 2>/dev/null; then
+        echo "PASS  model $m known to codex"
+      else
+        echo "WARN  model $m not in codex models cache — update CONFIG if the model list changed"
+      fi
+    done
+  else
+    note "codex models cache or workflow script not found — model availability unverified"
+  fi
+elif command -v codex >/dev/null 2>&1; then
+  fail "codex CLI found but 'codex --version' failed — installation is broken"
+else
+  note "codex CLI not found — codex lanes and the codex audit voice are unavailable"
+fi
+
+if [ "$grok_ok" -eq 1 ]; then
+  pass "grok CLI usable ($(grok --version 2>/dev/null | head -1))"
+elif command -v grok >/dev/null 2>&1; then
+  fail "grok CLI found but 'grok --version' failed — installation is broken"
+else
+  note "grok CLI not found — the grok lane and the grok audit voice are unavailable"
+fi
+
+if [ "$codex_ok" -eq 1 ] && [ "$grok_ok" -eq 1 ]; then
+  pass "both CLI families usable — full cross-model audit panel"
+elif [ "$codex_ok" -eq 1 ] || [ "$grok_ok" -eq 1 ]; then
+  note "single CLI family — run 'xmodel-doctor --config' and pass the output as the workflow's config argument"
+else
+  fail "no usable external CLI — install the Codex CLI and/or the Grok CLI"
+fi
+
+echo "-----------------------"
+echo "$ok passed, $warn warnings, $bad failures"
+[ "$bad" -eq 0 ] || exit 1
+exit 0
