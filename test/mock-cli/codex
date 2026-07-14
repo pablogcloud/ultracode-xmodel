@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Mock Codex CLI for quota-free pipeline runs. Enforces the exact flag shape
+# used by agents/codex-worker.md and agents/codex-auditor.md — a missing or
+# unexpected flag is a failure, so drift between relays and mocks is caught.
+# Set MOCK_CLI_EXIT to force a nonzero exit (failure-path testing).
+set -u
+[ -n "${MOCK_CLI_EXIT:-}" ] && { echo "mock codex: forced failure" >&2; exit "$MOCK_CLI_EXIT"; }
+model="" lastmsg="" stdin_marker="" sandbox="" chdir="" cfg="" skipgit="" sub=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    exec) sub="exec"; shift ;;
+    --sandbox) sandbox="$2"; shift 2 ;;
+    -C) chdir="$2"; shift 2 ;;
+    -c) cfg="$2"; shift 2 ;;
+    --skip-git-repo-check) skipgit="yes"; shift ;;
+    -m) model="$2"; shift 2 ;;
+    -o) lastmsg="$2"; shift 2 ;;
+    -) stdin_marker="yes"; shift ;;
+    *) echo "mock codex: unexpected arg $1" >&2; exit 2 ;;
+  esac
+done
+missing=""
+[ "$sub" = "exec" ] || missing="$missing exec"
+[ -n "$sandbox" ] || missing="$missing --sandbox"
+[ -n "$chdir" ] || missing="$missing -C"
+[ -n "$cfg" ] || missing="$missing -c"
+[ -n "$skipgit" ] || missing="$missing --skip-git-repo-check"
+[ -n "$model" ] || missing="$missing -m"
+[ -n "$lastmsg" ] || missing="$missing -o"
+[ -n "$stdin_marker" ] || missing="$missing -(stdin)"
+[ -z "$missing" ] || { echo "mock codex: missing:$missing" >&2; exit 2; }
+prompt=$(cat)
+if printf '%s' "$prompt" | grep -q 'MATERIAL UNDER AUDIT'; then
+  if printf '%s' "$prompt" | grep -q 'INJECT_DEFECT'; then
+    printf 'Mock critique.\nVERDICT: DEFECT — planted defect\n' > "$lastmsg"
+  else
+    printf 'Mock critique.\nVERDICT: PASS\n' > "$lastmsg"
+  fi
+else
+  printf 'MOCK WORK OUTPUT (%s)\n' "$model" > "$lastmsg"
+fi
+echo "mock codex ok"
+exit 0

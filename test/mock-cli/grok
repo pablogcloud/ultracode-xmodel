@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Mock Grok CLI. Enforces the exact flag shape used by agents/grok-worker.md
+# and agents/grok-auditor.md; output goes to stdout, like the real CLI.
+# Set MOCK_CLI_EXIT to force a nonzero exit (failure-path testing).
+set -u
+[ -n "${MOCK_CLI_EXIT:-}" ] && { echo "mock grok: forced failure" >&2; exit "$MOCK_CLI_EXIT"; }
+model="" promptfile="" effort="" mode="" nosub=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -m) model="$2"; shift 2 ;;
+    --reasoning-effort) effort="$2"; shift 2 ;;
+    --permission-mode) mode="$2"; shift 2 ;;
+    --no-subagents) nosub="yes"; shift ;;
+    --disable-web-search) shift ;;
+    --prompt-file) promptfile="$2"; shift 2 ;;
+    *) echo "mock grok: unexpected arg $1" >&2; exit 2 ;;
+  esac
+done
+missing=""
+[ -n "$model" ] || missing="$missing -m"
+[ -n "$effort" ] || missing="$missing --reasoning-effort"
+[ -n "$mode" ] || missing="$missing --permission-mode"
+[ -n "$nosub" ] || missing="$missing --no-subagents"
+{ [ -n "$promptfile" ] && [ -f "$promptfile" ]; } || missing="$missing --prompt-file"
+[ -z "$missing" ] || { echo "mock grok: missing:$missing" >&2; exit 2; }
+if grep -q 'MATERIAL UNDER AUDIT' "$promptfile"; then
+  if grep -q 'INJECT_DEFECT' "$promptfile"; then
+    printf 'Mock critique.\nVERDICT: DEFECT — planted defect\n'
+  else
+    printf 'Mock critique.\nVERDICT: PASS\n'
+  fi
+else
+  printf 'MOCK WORK OUTPUT (%s)\n' "$model"
+fi
+exit 0
