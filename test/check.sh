@@ -55,6 +55,30 @@ done
 grep -q 'read-only' agents/codex-auditor.md || err "agents/codex-auditor.md: auditor must run sandbox read-only"
 grep -q 'plan' agents/grok-auditor.md || err "agents/grok-auditor.md: auditor must run permission-mode plan"
 
+# --- Capability-directive enum enforcement (not just charset) ---
+# The refusal rule for capability directives (SANDBOX/EFFORT for codex-worker,
+# MODE/EFFORT for grok-worker) must name the exact declared value set, not
+# just a safe character class — otherwise an out-of-enum but charset-clean
+# value (e.g. SANDBOX: danger-full-access, MODE: bypassPermissions) would be
+# interpolated uninspected. Assert the enum tokens appear in the same
+# refusal-rule line as the REFUSE clause that names the directive.
+capability_enum_check() {
+  f="$1"; ctx_pat="$2"; shift 2
+  line=$(grep -m1 -E "$ctx_pat" "$f")
+  if [ -z "$line" ]; then
+    err "$f: capability-directive refusal context not found (pattern: $ctx_pat)"
+    return
+  fi
+  for tok in "$@"; do
+    case "$line" in
+      *"$tok"*) : ;;
+      *) err "$f: capability-directive refusal must name '$tok'" ;;
+    esac
+  done
+}
+[ -f agents/codex-worker.md ] && capability_enum_check agents/codex-worker.md 'REFUSE.*SANDBOX' 'read-only' 'workspace-write' 'low' 'medium' 'high' 'xhigh' 'max'
+[ -f agents/grok-worker.md ] && capability_enum_check agents/grok-worker.md 'REFUSE.*MODE' 'plan' 'acceptEdits' 'low' 'medium' 'high' 'xhigh' 'max'
+
 # --- Workflow JS syntax + meta literal (present from Task 4 on) ---
 if [ -f skills/ultracode-xmodel/ultracode-xmodel.js ]; then
   # Workflow scripts run inside an async wrapper with top-level `return`,
