@@ -252,4 +252,71 @@ export const scenarios = [
       assert.equal(a.length, 1)
       assert.match(a[0].opts.agentType, /codex-auditor$/) // cross-family voice still chosen
     } },
+
+  { name: 'duplicate task ids are rejected, both instances',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [
+          t('dup', { lane: 'codex-high', effort: 'high', complexity: 5, stakes: 'high' }),
+          t('dup', { complexity: 1, stakes: 'low' }),
+        ] },
+        responder())
+      assert.equal(workerCalls(calls).length, 0)
+      assert.equal(result.results.length, 0)
+      assert.equal(result.rejected.length, 2)
+      assert.match(result.rejected[0].error, /unique/)
+    } },
+
+  { name: 'invalid explicit stakes or complexity is rejected, not downgraded',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [
+          t('vs', { stakes: 'HIGH' }),
+          t('vc', { complexity: 0 }),
+        ] },
+        responder({ triage: { scores: [] } }))
+      assert.equal(workerCalls(calls).length, 0)
+      assert.equal(result.rejected.length, 2)
+      assert.match(result.rejected[0].error, /invalid explicit stakes/)
+      assert.match(result.rejected[1].error, /invalid explicit complexity/)
+    } },
+
+  { name: 'missing or empty prompt is rejected',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [{ id: 'np' }] },
+        responder({ triage: { scores: [] } }))
+      assert.equal(workerCalls(calls).length, 0)
+      assert.equal(result.rejected.length, 1)
+      assert.match(result.rejected[0].error, /prompt/)
+    } },
+
+  { name: 'explicit complexity and stakes skip triage scoring entirely',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('ex', { complexity: 4, stakes: 'low' })] },
+        responder())
+      assert.equal(calls.filter(isTriage).length, 0)
+      assert.equal(result.results[0].source, 'explicit')
+      assert.equal(result.results[0].band, 'high')
+      assert.equal(auditCalls(calls).length, 2)
+    } },
+
+  { name: 'null config container returns a clean error',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('cc', { lane: 'grok', effort: 'high' })], config: { lanes: null } },
+        responder())
+      assert.match(result.error, /config\.lanes/)
+      assert.equal(calls.length, 0)
+    } },
+
+  { name: 'non-array tasks value returns a clean error',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: 'do stuff' },
+        responder())
+      assert.match(result.error, /non-empty array/)
+      assert.equal(calls.length, 0)
+    } },
 ]

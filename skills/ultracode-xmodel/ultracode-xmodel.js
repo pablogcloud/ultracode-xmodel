@@ -75,11 +75,18 @@ if (typeof input === 'string') {
   }
 }
 const tasks = (input && input.tasks) || []
-if (!tasks.length) {
-  return { error: 'args.tasks is empty — pass { tasks: [{ id, prompt, ... }] }' }
+if (!Array.isArray(tasks) || !tasks.length) {
+  return { error: 'args.tasks must be a non-empty array — pass { tasks: [{ id, prompt, ... }] }' }
 }
 const doAudit = !input || input.audit !== false
 const cfg = deepMerge(CONFIG, input && input.config)
+// A config override may null out a whole container; fail cleanly, not with
+// a TypeError deep in routing.
+for (const key of ['lanes', 'roles', 'auditors']) {
+  if (!cfg[key] || typeof cfg[key] !== 'object' || Array.isArray(cfg[key])) {
+    return { error: `config.${key} must be an object` }
+  }
+}
 // Dropping an auditor or lane via config (e.g. { auditors: { grok: null } })
 // leaves a null entry; remove them, then heal any role that pointed at a
 // removed lane so a degraded install still routes to what exists.
@@ -99,24 +106,40 @@ for (const role of Object.keys(cfg.roles)) {
 // inject extra directive lines.
 const BAD_PATH = /[\n\r;|&'"`$]/
 const SANDBOXES = ['read-only', 'workspace-write']
-const isUnsafe = t => (t.dir && BAD_PATH.test(String(t.dir))) || (t.sandbox && !SANDBOXES.includes(t.sandbox))
-// An explicit lane that doesn't exist is a caller error: reject it rather
-// than silently rerouting — explicit values are never overridden.
-const unknownLane = t => t.lane && !cfg.lanes[t.lane]
-const rejected = tasks
-  .filter(isUnsafe)
-  .map(t => ({ id: t.id, error: 'rejected: dir contains shell/quote/newline characters, or sandbox is not read-only|workspace-write' }))
-  .concat(tasks
-    .filter(t => !isUnsafe(t) && unknownLane(t))
-    .map(t => ({ id: t.id, error: `rejected: unknown lane "${t.lane}"` })))
-const runnable = tasks.filter(t => !isUnsafe(t) && !unknownLane(t))
-if (rejected.length) log(`${rejected.length} task(s) rejected before dispatch (unsafe values or unknown lane)`)
+// Caller errors are rejected, never guessed around: routing state is keyed
+// by id (duplicates would silently corrupt it), and an invalid explicit
+// complexity/stakes would otherwise band LOW — a silent downgrade.
+const idCount = {}
+for (const t of tasks) {
+  const k = typeof t.id === 'string' && t.id ? t.id : ''
+  idCount[k] = (idCount[k] || 0) + 1
+}
+function rejectionOf(t) {
+  if (!(typeof t.id === 'string' && t.id) || idCount[t.id] > 1) return 'rejected: id must be a unique non-empty string'
+  if (!(typeof t.prompt === 'string' && t.prompt.trim())) return 'rejected: prompt must be a non-empty string'
+  if (t.complexity != null && !(Number.isInteger(t.complexity) && t.complexity >= 1 && t.complexity <= 5)) return 'rejected: invalid explicit complexity (integer 1-5)'
+  if (t.stakes != null && t.stakes !== 'low' && t.stakes !== 'high') return 'rejected: invalid explicit stakes ("low"|"high")'
+  if (t.effort != null && typeof t.effort !== 'string') return 'rejected: invalid explicit effort'
+  if ((t.dir && BAD_PATH.test(String(t.dir))) || (t.sandbox && !SANDBOXES.includes(t.sandbox))) return 'rejected: dir contains shell/quote/newline characters, or sandbox is not read-only|workspace-write'
+  if (t.lane && !cfg.lanes[t.lane]) return `rejected: unknown lane "${t.lane}"`
+  return null
+}
+const rejected = []
+const runnable = []
+for (const t of tasks) {
+  const reason = rejectionOf(t)
+  if (reason) rejected.push({ id: t.id, error: reason })
+  else runnable.push(t)
+}
+if (rejected.length) log(`${rejected.length} task(s) rejected before dispatch (invalid ids/fields, unsafe values, or unknown lane)`)
 
 // ------------------------------ triage ---------------------------------
 phase('Triage')
-const fullyLabeled = t =>
-  t.lane && t.effort && (!doAudit || (t.complexity != null && t.stakes != null))
-const toScore = runnable.filter(t => !fullyLabeled(t))
+// Score only tasks whose banding actually needs it: something is missing
+// AND the result would be used (with auditing off, a task that already has
+// lane + effort routes entirely on explicit values).
+const toScore = runnable.filter(t =>
+  (t.complexity == null || t.stakes == null) && !(t.lane && t.effort && !doAudit))
 const scores = {}
 if (toScore.length) {
   const triagePrompt = [
