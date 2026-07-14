@@ -325,7 +325,7 @@ if [ -f skills/ultracode-xmodel/ultracode-xmodel.js ]; then
       new Function("args", "agent", "parallel", "pipeline", "phase", "log", "budget",
         "return (async () => { " + body + " })()");
     } catch (e) { console.error("workflow syntax error: " + e.message); process.exit(1); }
-  ' || err "workflow script has a syntax error"
+  ' || err "workflow syntax error"
   # Best-effort meta lint: the meta block must evaluate as a bare object
   # literal (free identifiers throw) and carry name + description strings.
   node -e '
