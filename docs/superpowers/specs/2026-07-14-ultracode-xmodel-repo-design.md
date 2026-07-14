@@ -113,6 +113,8 @@ Carried forward and documented in SECURITY.md:
 
 README sections: what/why (cross-model adversarial execution, orchestrator spends ~0 Claude tokens on reasoning), how it works, quickstart, args contract with examples, effort-layer explanation (the mapping table), configuration, degraded modes, FAQ, troubleshooting pointer.
 
+Attribution (top of README, directly after title + description, mirroring github.com/coreyhaines31/marketingskills): a "Built by FORMM Labs" paragraph with a link to formm.mx — FORMM Labs presented as the research division of FORMM Creative Group, constantly building AI tools to implement across all operational aspects and ultimately to transform the construction and development industry. Manifest author and license holder carry the FORMM identity (author: FORMM Labs; MIT holder: FORMM Creative Group).
+
 Voice (applies to ALL shipped files — README, SKILL.md, docs/, code comments): professional public open-source tone, written like a polished GitHub project. State how the system works and how to use it; never narrate platform gaps, workarounds, internal history, or what the repo does not contain (e.g. no "plugins can't ship workflows, so..." explanations — the install and invocation instructions simply ARE the way it works). Rationale and meta-notes live only in this spec, not in shipped files.
 
 Mermaid diagrams (render natively on GitHub; exported PNG fallbacks in docs/assets/):
