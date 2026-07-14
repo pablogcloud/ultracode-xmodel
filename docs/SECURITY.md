@@ -21,9 +21,15 @@ any write-enabled run.
   absolute: an auditor cannot browse the web, but if your Codex CLI has MCP
   servers configured, those remain reachable by Codex itself (see
   "Prompt-injection blast radius").
-- **Workers default to read-only.** A task must explicitly request
-  `sandbox: workspace-write` before its lane may edit files, and the
-  relay confines writes to the task's `dir` and its private temp dir.
+- **Workers default to read-only, but write confinement differs by lane.**
+  A task must explicitly request `sandbox: workspace-write` before its lane
+  may edit files. For codex lanes, `--sandbox workspace-write` is an OS-level
+  sandbox that confines writes. For the grok lane, `--permission-mode
+  acceptEdits` is an approval setting, **not** a path jail: the relay runs
+  Grok inside the task's `dir`, but a write-enabled Grok task is not
+  prevented from writing elsewhere via absolute paths. Grant
+  `sandbox: workspace-write` on the grok lane only to tasks you trust with
+  your filesystem, and review the diff of any write-enabled run.
 - **Relays are mechanical.** Each relay makes at most two CLI invocations
   per task (one call, plus at most one retry on clearly transient errors —
   auditors never retry), never calls MCP servers or the web itself, and

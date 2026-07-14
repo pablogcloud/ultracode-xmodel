@@ -340,6 +340,26 @@ export const scenarios = [
       assert.equal(calls.length, 0)
     } },
 
+  { name: 'config directive value with a space (arg injection) is rejected',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('sp', { lane: 'codex-high', effort: 'high' })],
+          config: { lanes: { 'codex-high': { directives: { MODEL: 'model --dangerous-flag' } } } } },
+        responder())
+      assert.match(result.error, /unsafe characters/)
+      assert.equal(calls.length, 0)
+    } },
+
+  { name: 'config directive KEY with metacharacters is rejected',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('ck', { lane: 'codex-high', effort: 'high' })],
+          config: { lanes: { 'codex-high': { directives: { 'MODEL; printf X': 'gpt-5.6-terra' } } } } },
+        responder())
+      assert.match(result.error, /uppercase identifier/)
+      assert.equal(calls.length, 0)
+    } },
+
   { name: 'empty worker output is failed, never approved',
     async run(runWorkflow) {
       const { result, calls } = await runWorkflow(

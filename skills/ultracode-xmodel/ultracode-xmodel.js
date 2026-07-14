@@ -87,27 +87,34 @@ for (const key of ['lanes', 'roles', 'auditors']) {
     return { error: `config.${key} must be an object` }
   }
 }
-// Every directive value is emitted as a `KEY: value` line and interpolated
-// unquoted into the relay's CLI command. A newline could smuggle an extra
-// directive; a shell metacharacter could inject a command. Reject either in
-// any configured lane/auditor directive (config is caller-supplied too).
-const DIRECTIVE_UNSAFE = /[\n\r;|&'"`$()<>]/
+// Directive KEYS and VALUES are both emitted as `KEY: value` lines and
+// interpolated UNQUOTED into the relay's CLI command. Constrain both: a key
+// must be an uppercase identifier (so it cannot smuggle a newline or an
+// extra directive), and a value must be a single shell-safe token — no
+// spaces (which would become extra CLI arguments), no metacharacters, no
+// newlines. Config is caller-supplied, so this runs over the merged config.
+// (Task `dir` is the one value that may contain spaces; the relay
+// single-quotes it and it is validated separately by BAD_PATH.)
+const SAFE_KEY = /^[A-Z][A-Z0-9_]*$/
+const SAFE_TOKEN = /^[A-Za-z0-9._/-]+$/
+function checkDirectives(dirs, where) {
+  for (const k of Object.keys(dirs)) {
+    if (dirs[k] == null) continue
+    if (!SAFE_KEY.test(k)) return `${where}: directive name "${k}" must be an uppercase identifier`
+    if (!SAFE_TOKEN.test(String(dirs[k]))) return `${where}: directive ${k} value has unsafe characters (spaces/metacharacters)`
+  }
+  return null
+}
 for (const group of ['lanes', 'auditors']) {
   for (const name of Object.keys(cfg[group])) {
     const entry = cfg[group][name]
-    const dirs = (entry && entry.directives) || {}
-    for (const k of Object.keys(dirs)) {
-      if (DIRECTIVE_UNSAFE.test(String(dirs[k]))) {
-        return { error: `config.${group}.${name}.directives.${k} contains unsafe characters` }
-      }
-    }
-    if (entry && entry.sandbox) {
+    if (!entry) continue
+    let e = checkDirectives(entry.directives || {}, `config.${group}.${name}.directives`)
+    if (e) return { error: e }
+    if (entry.sandbox) {
       for (const sb of Object.keys(entry.sandbox)) {
-        for (const k of Object.keys(entry.sandbox[sb])) {
-          if (DIRECTIVE_UNSAFE.test(String(entry.sandbox[sb][k]))) {
-            return { error: `config.${group}.${name}.sandbox.${sb}.${k} contains unsafe characters` }
-          }
-        }
+        e = checkDirectives(entry.sandbox[sb] || {}, `config.${group}.${name}.sandbox.${sb}`)
+        if (e) return { error: e }
       }
     }
   }
