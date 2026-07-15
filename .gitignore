@@ -3,3 +3,6 @@ node_modules/
 *.log
 tmp/
 .superpowers/
+
+# Internal planning/design docs — kept local, not shipped in the public plugin
+docs/superpowers/
