@@ -380,6 +380,16 @@ export const scenarios = [
       assert.equal(calls.length, 0)
     } },
 
+  { name: 'a CLI-valid effort outside the common five (ultra) is accepted',
+    async run(runWorkflow) {
+      const { result, calls } = await runWorkflow(
+        { tasks: [t('u1', { lane: 'codex-high', effort: 'ultra', complexity: 3, stakes: 'low' })] },
+        responder())
+      assert.equal(result.rejected.length, 0)
+      const w = workerCalls(calls)[0]
+      assert.match(w.prompt, /EFFORT: ultra/)
+    } },
+
   { name: 'empty worker output is failed, never approved',
     async run(runWorkflow) {
       const { result, calls } = await runWorkflow(

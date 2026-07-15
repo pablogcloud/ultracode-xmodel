@@ -97,13 +97,21 @@ for (const key of ['lanes', 'roles', 'auditors']) {
 // single-quotes it and it is validated separately by BAD_PATH.)
 const SAFE_KEY = /^[A-Z][A-Z0-9_]*$/
 const SAFE_TOKEN = /^[A-Za-z0-9._/-]+$/
+// Effort is injection-checked, not allow-listed (a lowercase word carries no
+// spaces, metacharacters, or leading dash); the CLI judges which words it
+// accepts, so tool/version-specific values like codex `ultra` or grok
+// `none`/`minimal` are not rejected here.
+const EFFORT_RE = /^[a-z]+$/
 // Metacharacter-safety is not enough for the capability-bearing directives:
 // a value like `danger-full-access` or `bypassPermissions` is shell-safe but
 // disables the sandbox/approval boundary. Constrain those to their intended
 // sets; other directives (e.g. MODEL, an open-ended id) only need to be a
 // safe token.
+// SANDBOX and MODE are privilege-bearing (a wrong value escalates capability),
+// so they are strictly allow-listed. EFFORT is not (see EFFORT_RE above), so it
+// is only injection-checked. Other directives (e.g. MODEL, an open-ended id)
+// need only be a safe token.
 const DIRECTIVE_ENUMS = {
-  EFFORT: ['low', 'medium', 'high', 'xhigh', 'max'],
   SANDBOX: ['read-only', 'workspace-write'],
   MODE: ['plan', 'acceptEdits', 'default'],
 }
@@ -114,6 +122,8 @@ function checkDirectives(dirs, where) {
     const v = String(dirs[k])
     if (DIRECTIVE_ENUMS[k]) {
       if (!DIRECTIVE_ENUMS[k].includes(v)) return `${where}: directive ${k} must be one of ${DIRECTIVE_ENUMS[k].join('|')}`
+    } else if (k === 'EFFORT') {
+      if (!EFFORT_RE.test(v)) return `${where}: directive EFFORT must be a lowercase word`
     } else if (!SAFE_TOKEN.test(v)) {
       return `${where}: directive ${k} value has unsafe characters (spaces/metacharacters)`
     }
@@ -153,9 +163,8 @@ for (const role of Object.keys(cfg.roles)) {
 // inject extra directive lines.
 const BAD_PATH = /[\n\r;|&'"`$]/
 const SANDBOXES = ['read-only', 'workspace-write']
-// Worker effort is interpolated unquoted into `model_reasoning_effort=<EFFORT>`;
-// accept only the known token set so a caller cannot inject shell text.
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+// EFFORT_RE is declared above (with the directive validators) and reused here
+// for per-task effort.
 // Caller errors are rejected, never guessed around: routing state is keyed
 // by id (duplicates would silently corrupt it), and an invalid explicit
 // complexity/stakes would otherwise band LOW — a silent downgrade.
@@ -169,7 +178,7 @@ function rejectionOf(t) {
   if (!(typeof t.prompt === 'string' && t.prompt.trim())) return 'rejected: prompt must be a non-empty string'
   if (t.complexity != null && !(Number.isInteger(t.complexity) && t.complexity >= 1 && t.complexity <= 5)) return 'rejected: invalid explicit complexity (integer 1-5)'
   if (t.stakes != null && t.stakes !== 'low' && t.stakes !== 'high') return 'rejected: invalid explicit stakes ("low"|"high")'
-  if (t.effort != null && !EFFORTS.includes(t.effort)) return 'rejected: invalid explicit effort (low|medium|high|xhigh|max)'
+  if (t.effort != null && !EFFORT_RE.test(t.effort)) return 'rejected: invalid explicit effort (must be a lowercase word)'
   if ((t.dir && BAD_PATH.test(String(t.dir))) || (t.sandbox && !SANDBOXES.includes(t.sandbox))) return 'rejected: dir contains shell/quote/newline characters, or sandbox is not read-only|workspace-write'
   if (t.lane && !cfg.lanes[t.lane]) return `rejected: unknown lane "${t.lane}"`
   return null
