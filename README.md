@@ -10,7 +10,7 @@ lane, reasoning effort, and audit depth from its measured complexity, and
 gate every substantial result behind an adversarial refute panel drawn from
 a different model family.
 
-Built by [FORMM Labs](https://formm.mx?ref=ultracode-xmodel) — the research
+Built by [FORMM Labs](https://formm.mx/labs?ref=ultracode-xmodel) — the research
 division of [FORMM Creative Group](https://formm.mx). We build AI tooling
 for every operational aspect of our business, and we put those same tools
 to work on our larger goal: transforming how the construction and
@@ -114,6 +114,38 @@ sequenceDiagram
   G-->>W: critique, verbatim
   W->>W: parse last VERDICT → approved / rejected
 ```
+
+## Use cases
+
+Where the combination of external execution, effort routing, and cross-model
+audit pays off:
+
+- **Parallel batches of self-contained work.** A list of independent tasks —
+  implement these eight helper functions with tests, add docstrings across
+  these modules, generate these fixtures — runs concurrently on external
+  models while your Claude session only orchestrates.
+- **High-stakes changes that warrant a second and third opinion.** A
+  security-sensitive edit (auth, payments, a schema migration) is produced by
+  one model family and adversarially reviewed by another before you trust it —
+  the same cross-model refutation that shows its worth on real bugs.
+- **Mixed workloads where effort should not be uniform.** A batch with a few
+  trivial renames and a couple of genuinely hard pieces: triage routes the
+  cheap ones to a cheap lane with no audit and reserves the strongest lane and
+  full panel for what actually needs it, instead of paying maximum effort on
+  everything.
+- **Reducing single-model blind spots.** When you do not fully trust one
+  model's output, an independent family is tasked with refuting it; approval
+  requires every voice to fail to break it.
+- **Keeping your main quota for orchestration.** The orchestrating session
+  spends tokens on one triage call and thin relays; the heavy reasoning runs
+  on your external Codex/Grok subscriptions.
+- **Fan-out research and audits.** Analyze these N documents independently,
+  review these modules for a specific bug class — each item self-contained,
+  each verifiable.
+
+It is **not** a fit for tightly-coupled work that needs shared context across
+tasks, interactive/real-time turns, or anything where the task cannot be made
+self-contained — the external CLI cannot see your Claude session.
 
 ## Requirements
 

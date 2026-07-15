@@ -1,6 +1,6 @@
 {
   "name": "ultracode-xmodel",
-  "owner": { "name": "FORMM Labs", "url": "https://formm.mx" },
+  "owner": { "name": "FORMM Labs", "url": "https://formm.mx/labs" },
   "plugins": [
     {
       "name": "ultracode-xmodel",
