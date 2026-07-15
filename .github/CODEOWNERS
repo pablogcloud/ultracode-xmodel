@@ -1,0 +1,3 @@
+# Default reviewer for everything. Add co-maintainers here (or per-path) to
+# spread review load — any of them can satisfy the required review.
+* @pablogcloud
