@@ -56,12 +56,17 @@ grep -q 'read-only' agents/codex-auditor.md || err "agents/codex-auditor.md: aud
 grep -q 'plan' agents/grok-auditor.md || err "agents/grok-auditor.md: auditor must run permission-mode plan"
 
 # --- Capability-directive enum enforcement (not just charset) ---
-# The refusal rule for capability directives (SANDBOX/EFFORT for codex-worker,
-# MODE/EFFORT for grok-worker) must name the exact declared value set, not
-# just a safe character class — otherwise an out-of-enum but charset-clean
-# value (e.g. SANDBOX: danger-full-access, MODE: bypassPermissions) would be
-# interpolated uninspected. Assert the enum tokens appear in the same
-# refusal-rule line as the REFUSE clause that names the directive.
+# The refusal rule for capability directives (SANDBOX for codex-worker, MODE
+# for grok-worker — privilege-bearing, so they stay strict allowlists) must
+# name the exact declared value set, not just a safe character class —
+# otherwise an out-of-enum but charset-clean value (e.g. SANDBOX:
+# danger-full-access, MODE: bypassPermissions) would be interpolated
+# uninspected. Assert the enum tokens appear in the same refusal-rule line
+# as the REFUSE clause that names the directive. EFFORT is deliberately NOT
+# enum-enforced here (see the lowercase-word check below): it is a
+# CLI-defined value set (Codex supports `ultra`; Grok supports
+# `none`/`minimal` beyond low/medium/high/xhigh/max) that the relay must not
+# hard-limit — the CLI itself validates which effort words it accepts.
 capability_enum_check() {
   f="$1"; ctx_pat="$2"; shift 2
   line=$(grep -m1 -E "$ctx_pat" "$f")
@@ -76,8 +81,18 @@ capability_enum_check() {
     esac
   done
 }
-[ -f agents/codex-worker.md ] && capability_enum_check agents/codex-worker.md 'REFUSE.*SANDBOX' 'read-only' 'workspace-write' 'low' 'medium' 'high' 'xhigh' 'max'
-[ -f agents/grok-worker.md ] && capability_enum_check agents/grok-worker.md 'REFUSE.*MODE' 'plan' 'acceptEdits' 'low' 'medium' 'high' 'xhigh' 'max'
+[ -f agents/codex-worker.md ] && capability_enum_check agents/codex-worker.md 'REFUSE.*SANDBOX' 'read-only' 'workspace-write'
+[ -f agents/grok-worker.md ] && capability_enum_check agents/grok-worker.md 'REFUSE.*MODE' 'plan' 'acceptEdits'
+
+# --- EFFORT is injection-checked as a lowercase word, not a fixed value set ---
+# (Codex supports `ultra`; Grok supports `none`/`minimal` beyond low/medium/
+# high/xhigh/max — the CLI itself validates which effort words it accepts,
+# so the relay must not hard-limit the set; it must still reject anything
+# with spaces, digits, dashes, or metacharacters.)
+for f in agents/codex-worker.md agents/grok-worker.md; do
+  [ -f "$f" ] || continue
+  grep -Eq 'EFFORT.*lowercase word' "$f" || err "$f: EFFORT refusal must constrain to a lowercase word, not a fixed value set"
+done
 
 # --- Workflow JS syntax + meta literal (present from Task 4 on) ---
 if [ -f skills/ultracode-xmodel/ultracode-xmodel.js ]; then
