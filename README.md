@@ -8,7 +8,8 @@
 external frontier models through the Codex and Grok CLIs, route each task's
 lane, reasoning effort, and audit depth from its measured complexity, and
 gate every substantial result behind an adversarial refute panel drawn from
-a different model family.
+a different model family. For native Claude Code Workflows, blend short,
+schema-backed Codex verifiers or jurors into Claude-led discovery and synthesis.
 
 Built by [FORMM Labs](https://formm.mx/labs?ref=ultracode-xmodel) — the research
 division of [FORMM Creative Group](https://formm.mx). We build AI tooling
@@ -68,6 +69,18 @@ Each task flows through three phases:
 3. **Audit.** Results are challenged by auditors instructed to refute the
    work and end with a machine-parseable `VERDICT:` line. The panel size
    comes from the routing band; approval requires every voice to PASS.
+
+### Two complementary skills
+
+| Skill | Use it for |
+|---|---|
+| `ultracode-xmodel` | Batches of self-contained work routed to external Codex/Grok lanes with complexity-based audit depth |
+| `ultracode-xmodel-blend` | Claude-led native Workflows with short, read-only, schema-backed Codex verifier or juror nodes |
+
+The blend skill keeps broad discovery and synthesis on Claude while Codex
+independently verifies findings, judges candidates, or cross-checks a risky
+conclusion. It uses the packaged `codex-structured` relay and fails closed when
+the independent node cannot return schema-valid data.
 
 ### Effort routing
 

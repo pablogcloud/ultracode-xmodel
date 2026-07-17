@@ -1,9 +1,9 @@
 {
   "name": "ultracode-xmodel",
-  "version": "0.1.0",
-  "description": "Run self-contained tasks on external frontier models with complexity-based effort routing and a cross-model adversarial audit panel.",
+  "version": "0.2.0",
+  "description": "Run routed tasks on external frontier models or blend short, structured Codex verifiers into native Claude Code workflows.",
   "author": { "name": "FORMM Labs", "url": "https://formm.mx/labs" },
   "homepage": "https://github.com/pablogcloud/ultracode-xmodel",
   "license": "MIT",
-  "keywords": ["claude-code", "orchestration", "multi-agent", "codex", "grok", "adversarial-review"]
+  "keywords": ["claude-code", "orchestration", "multi-agent", "codex", "grok", "adversarial-review", "structured-output", "workflow"]
 }

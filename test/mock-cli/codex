@@ -5,7 +5,7 @@
 # Set MOCK_CLI_EXIT to force a nonzero exit (failure-path testing).
 set -u
 [ -n "${MOCK_CLI_EXIT:-}" ] && { echo "mock codex: forced failure" >&2; exit "$MOCK_CLI_EXIT"; }
-model="" lastmsg="" stdin_marker="" sandbox="" chdir="" cfg="" skipgit="" sub=""
+model="" lastmsg="" stdin_marker="" sandbox="" chdir="" cfg="" skipgit="" sub="" schema=""
 while [ $# -gt 0 ]; do
   case "$1" in
     exec) sub="exec"; shift ;;
@@ -14,6 +14,7 @@ while [ $# -gt 0 ]; do
     -c) cfg="$2"; shift 2 ;;
     --skip-git-repo-check) skipgit="yes"; shift ;;
     -m) model="$2"; shift 2 ;;
+    --output-schema) schema="$2"; shift 2 ;;
     -o) lastmsg="$2"; shift 2 ;;
     -) stdin_marker="yes"; shift ;;
     *) echo "mock codex: unexpected arg $1" >&2; exit 2 ;;
@@ -25,12 +26,17 @@ missing=""
 [ -n "$chdir" ] || missing="$missing -C"
 [ -n "$cfg" ] || missing="$missing -c"
 [ -n "$skipgit" ] || missing="$missing --skip-git-repo-check"
-[ -n "$model" ] || missing="$missing -m"
+[ -n "$model" ] || [ -n "$schema" ] || missing="$missing -m"
 [ -n "$lastmsg" ] || missing="$missing -o"
 [ -n "$stdin_marker" ] || missing="$missing -(stdin)"
 [ -z "$missing" ] || { echo "mock codex: missing:$missing" >&2; exit 2; }
 prompt=$(cat)
-if printf '%s' "$prompt" | grep -q 'MATERIAL UNDER AUDIT'; then
+if [ -n "$schema" ]; then
+  [ -f "$schema" ] || { echo "mock codex: schema file missing" >&2; exit 2; }
+  node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$schema" \
+    >/dev/null 2>&1 || { echo "mock codex: invalid schema" >&2; exit 2; }
+  printf '{"ok":true}\n' > "$lastmsg"
+elif printf '%s' "$prompt" | grep -q 'MATERIAL UNDER AUDIT'; then
   if printf '%s' "$prompt" | grep -q 'INJECT_DEFECT'; then
     printf 'Mock critique.\nVERDICT: DEFECT — planted defect\n' > "$lastmsg"
   else

@@ -14,10 +14,11 @@ for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
 done
 
 # --- Agent frontmatter ---
-for f in agents/codex-worker.md agents/grok-worker.md agents/codex-auditor.md agents/grok-auditor.md; do
+for f in agents/codex-worker.md agents/grok-worker.md agents/codex-auditor.md agents/grok-auditor.md agents/codex-structured.md; do
   [ -f "$f" ] || { err "$f missing"; continue; }
   head -1 "$f" | grep -q '^---$' || err "$f: no frontmatter"
   grep -q '^name: ' "$f" || err "$f: no name"
+  grep -q '^description: ' "$f" || err "$f: no description"
   grep -q '^model: haiku$' "$f" || err "$f: relay must pin model: haiku"
   grep -q '^tools: Write, Read, Bash$' "$f" || err "$f: relay tools must be Write, Read, Bash"
   grep -q 'VERBATIM' "$f" || err "$f: verbatim contract text missing"
@@ -54,6 +55,26 @@ for f in agents/grok-worker.md agents/grok-auditor.md; do
 done
 grep -q 'read-only' agents/codex-auditor.md || err "agents/codex-auditor.md: auditor must run sandbox read-only"
 grep -q 'plan' agents/grok-auditor.md || err "agents/grok-auditor.md: auditor must run permission-mode plan"
+
+# --- Structured Codex relay + blended skill contract ---
+sf=agents/codex-structured.md
+grep -q 'SCHEMA_JSON:' "$sf" || err "$sf: schema directive missing"
+grep -q -- '--output-schema' "$sf" || err "$sf: Codex schema flag missing"
+grep -q -- '--sandbox read-only' "$sf" || err "$sf: structured relay must be read-only"
+grep -q -- '---TASK---' "$sf" || err "$sf: task framing marker missing"
+grep -q 'JSON.parse' "$sf" || err "$sf: schema JSON validation missing"
+grep -q 'CODEX-WRAPPER-ERROR' "$sf" || err "$sf: failure sentinel missing"
+if grep -q -- '--dangerously-bypass-approvals-and-sandbox' "$sf"; then
+  err "$sf: structured relay must never document or permit sandbox bypass"
+fi
+
+blend=skills/ultracode-xmodel-blend/SKILL.md
+[ -f "$blend" ] || err "$blend missing"
+grep -q '^name: ultracode-xmodel-blend$' "$blend" || err "$blend: frontmatter name mismatch"
+grep -Fq "agentType: \`\${agentPrefix}codex-structured\`" "$blend" || err "$blend: packaged relay routing missing"
+grep -q '_codex_error' "$blend" || err "$blend: infrastructure error discipline missing"
+grep -q 'additionalProperties: false' "$blend" || err "$blend: strict schema guidance missing"
+[ -f skills/ultracode-xmodel-blend/references/workflow-patterns.md ] || err "blend workflow patterns missing"
 
 # --- Capability-directive enum enforcement (not just charset) ---
 # The refusal rule for capability directives (SANDBOX for codex-worker, MODE
@@ -126,7 +147,7 @@ fi
 
 # --- Shell scripts ---
 if command -v shellcheck >/dev/null 2>&1; then
-  for f in test/check.sh install.sh bin/xmodel-doctor test/mock-cli/codex test/mock-cli/grok test/run-mock-checks.sh; do
+  for f in test/check.sh install.sh bin/xmodel-doctor test/mock-cli/codex test/mock-cli/grok test/run-mock-checks.sh test/install-check.sh; do
     [ -f "$f" ] && { shellcheck "$f" || err "shellcheck: $f"; }
   done
 else

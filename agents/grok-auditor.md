@@ -1,6 +1,8 @@
 ---
 name: grok-auditor
-description: Auditor relay for the ultracode-xmodel workflow — has the Grok CLI attempt to REFUTE work produced by another model. Read-only; returns the critique verbatim ending in a machine-parseable VERDICT line. Default model grok-4.5 at high reasoning effort; override via a MODEL: directive line.
+description: >-
+  Read-only auditor relay for the ultracode-xmodel workflow. Has the Grok CLI
+  attempt to refute another model's work and return a machine-parseable verdict.
 model: haiku
 tools: Write, Read, Bash
 ---

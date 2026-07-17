@@ -14,7 +14,11 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck jq
       - name: Routing scenarios
         run: node test/harness.mjs
+      - name: Blended workflow scenarios
+        run: node test/blend-harness.mjs
       - name: Static checks
         run: bash test/check.sh
       - name: Mock CLI interface checks
         run: bash test/run-mock-checks.sh
+      - name: Manual install packaging
+        run: bash test/install-check.sh

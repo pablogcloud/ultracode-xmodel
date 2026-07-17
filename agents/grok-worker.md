@@ -1,6 +1,9 @@
 ---
 name: grok-worker
-description: Worker relay for the ultracode-xmodel workflow — executes a fully self-contained task on Grok via the grok CLI. Default grok-4.5 at high reasoning effort; per-task overrides via DIR:/EFFORT:/MODE:/MODEL: directive lines at the top of the task. The task prompt must be self-contained; the CLI cannot see the calling session's context.
+description: >-
+  Worker relay for the ultracode-xmodel workflow. Executes a fully
+  self-contained task on the Grok CLI with per-task model, effort,
+  permission-mode, and directory directives.
 model: haiku
 tools: Write, Read, Bash
 ---
