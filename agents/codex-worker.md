@@ -1,6 +1,9 @@
 ---
 name: codex-worker
-description: Worker relay for the ultracode-xmodel workflow — executes a fully self-contained coding or analysis task on the Codex CLI. Default model gpt-5.6-terra at high reasoning effort; per-task overrides via MODEL:/EFFORT:/SANDBOX:/DIR: directive lines at the top of the task. The task prompt must be self-contained; the CLI cannot see the calling session's context.
+description: >-
+  Worker relay for the ultracode-xmodel workflow. Executes a fully
+  self-contained coding or analysis task on the Codex CLI with per-task model,
+  effort, sandbox, and directory directives.
 model: haiku
 tools: Write, Read, Bash
 ---

@@ -1,6 +1,8 @@
 ---
 name: codex-auditor
-description: Auditor relay for the ultracode-xmodel workflow — has the Codex CLI attempt to REFUTE work produced by another model. Read-only; returns the critique verbatim ending in a machine-parseable VERDICT line. Default model gpt-5.6-sol at high reasoning effort; override via a MODEL: directive line.
+description: >-
+  Read-only auditor relay for the ultracode-xmodel workflow. Has the Codex CLI
+  attempt to refute another model's work and return a machine-parseable verdict.
 model: haiku
 tools: Write, Read, Bash
 ---

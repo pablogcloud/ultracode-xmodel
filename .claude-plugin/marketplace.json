@@ -1,11 +1,12 @@
 {
   "name": "ultracode-xmodel",
+  "description": "FORMM Labs cross-model orchestration plugins for Claude Code.",
   "owner": { "name": "FORMM Labs", "url": "https://formm.mx/labs" },
   "plugins": [
     {
       "name": "ultracode-xmodel",
       "source": "./",
-      "description": "Cross-model task execution with effort routing and an adversarial audit panel."
+      "description": "Cross-model task execution, adversarial audit panels, and mixed Claude plus structured Codex workflows."
     }
   ]
 }

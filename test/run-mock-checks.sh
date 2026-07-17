@@ -24,6 +24,19 @@ printf -- '--- MATERIAL UNDER AUDIT ---\nINJECT_DEFECT' | ./mock-cli/codex exec 
   --skip-git-repo-check -C "$tmp" -m "$cm" -c model_reasoning_effort=high -o "$tmp/b.md" - >/dev/null
 grep -q 'VERDICT: DEFECT' "$tmp/b.md" || { echo "FAIL codex audit DEFECT"; fail=1; }
 
+# codex structured-output relay shape
+printf '%s' '{"type":"object","additionalProperties":false,"required":["ok"],"properties":{"ok":{"type":"boolean"}}}' > "$tmp/schema.json"
+printf 'return structured output' | ./mock-cli/codex exec --sandbox read-only \
+  --skip-git-repo-check -C "$tmp" -m "$cm" -c model_reasoning_effort=medium \
+  --output-schema "$tmp/schema.json" -o "$tmp/structured.json" - >/dev/null
+grep -q '^{"ok":true}$' "$tmp/structured.json" || { echo "FAIL codex structured relay shape"; fail=1; }
+
+# structured relay may intentionally use the Codex CLI's configured default model
+printf 'return structured output' | ./mock-cli/codex exec --sandbox read-only \
+  --skip-git-repo-check -C "$tmp" -c model_reasoning_effort=medium \
+  --output-schema "$tmp/schema.json" -o "$tmp/structured-default-model.json" - >/dev/null
+grep -q '^{"ok":true}$' "$tmp/structured-default-model.json" || { echo "FAIL codex structured default-model shape"; fail=1; }
+
 # grok worker shape
 printf 'do the thing' > "$tmp/p.txt"
 out=$(./mock-cli/grok -m "$gm" --reasoning-effort high --permission-mode acceptEdits \
