@@ -310,21 +310,252 @@ function auditPrompt(t, auditor, output) {
 // a mention of the sentinel elsewhere in ordinary text is not a failure.
 const isWrapperError = s => typeof s === 'string' && /^\s*(CODEX|GROK)-WRAPPER-ERROR:/.test(s)
 
-const VERDICT_LINE = /^\s*VERDICT:\s*(PASS|DEFECT|NO-VERDICT)(?![A-Za-z])\s*[—-]?\s*(.*)$/i
+// Word-boundary rejects letter *and* hyphen continuations so PASSING and
+// PASS-IF-FIXED are not accepted as PASS.
+const VERDICT_LINE = /^\s*VERDICT:\s*(PASS|DEFECT|NO-VERDICT)(?![A-Za-z-])\s*(?:[—-]\s*)?(.*)$/i
+const VERDICT_TOKEN = /^(PASS|DEFECT|NO-VERDICT)(?![A-Za-z-])(?:\s*[—-]\s*(.*))?$/i
 
-function verdictOf(text) {
-  if (typeof text !== 'string' || !text.trim()) return { verdict: 'ERROR', detail: 'auditor returned nothing' }
-  if (isWrapperError(text)) return { verdict: 'ERROR', detail: text.slice(0, 300) }
-  // The verdict is only trusted on the auditor's FINAL non-empty line — the
-  // contract's position for it, and the relay's NO-VERDICT fallback always
-  // lands there. A `VERDICT:` string quoted mid-critique (e.g. echoing the
-  // worker's own claim) therefore cannot be read as the auditor's verdict.
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-  const last = lines[lines.length - 1] || ''
-  const m = last.match(VERDICT_LINE)
-  if (!m) return { verdict: 'NO-VERDICT', detail: text.slice(-400) }
-  return { verdict: m[1].toUpperCase(), detail: (m[2] || '').trim() }
+// Last syntactically valid VERDICT line wins. Trailing fences, usage footers,
+// and ordinary text after that line are ignored; a quoted mid-body line can
+// still win if the critic never issues its own later verdict.
+function parseVerdictLines(text) {
+  if (typeof text !== 'string' || !text.trim()) {
+    return { verdict: 'NO-VERDICT', detail: typeof text === 'string' ? text.slice(-400) : '' }
+  }
+  let last = null
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(VERDICT_LINE)
+    if (m) last = m
+  }
+  if (!last) return { verdict: 'NO-VERDICT', detail: text.slice(-400) }
+  return { verdict: last[1].toUpperCase(), detail: (last[2] || '').trim() }
 }
+
+function stableJson(value) {
+  try { return { ok: true, text: JSON.stringify(value) } }
+  catch (e) { return { ok: false, error: (e && e.message) || 'JSON serialization failed' } }
+}
+
+function verdictFromStructured(so) {
+  if (typeof so === 'string') return parseVerdictLines(so)
+  if (!so || typeof so !== 'object' || Array.isArray(so)) {
+    return { verdict: 'NO-VERDICT', detail: '' }
+  }
+  // Explicit schema verdict field has authority over any nested narrative.
+  // Narrative scanning is a fallback only when the explicit field is absent.
+  const hasExplicit = (typeof so.verdict === 'string' && so.verdict.trim())
+    || (typeof so.VERDICT === 'string' && so.VERDICT.trim())
+  if (hasExplicit) {
+    const raw = (typeof so.verdict === 'string' && so.verdict.trim()) ? so.verdict : so.VERDICT
+    const m = raw.trim().match(VERDICT_TOKEN)
+    if (m) {
+      const detail = (m[2] || '').trim() ||
+        (typeof so.detail === 'string' ? so.detail.trim() : '') ||
+        (typeof so.summary === 'string' ? so.summary.trim() : '')
+      return { verdict: m[1].toUpperCase(), detail }
+    }
+    // Allow "VERDICT: PASS" stuffed into the field.
+    const asLine = parseVerdictLines(raw)
+    if (asLine.verdict !== 'NO-VERDICT') return asLine
+    // Present-but-invalid explicit field fails closed; do not scan narrative.
+    return {
+      verdict: 'NO-VERDICT',
+      detail: (typeof so.summary === 'string' ? so.summary : raw).slice(0, 400),
+    }
+  }
+  for (const key of ['text', 'body', 'critique', 'content']) {
+    if (typeof so[key] === 'string' && so[key].trim()) {
+      const fromBody = parseVerdictLines(so[key])
+      if (fromBody.verdict !== 'NO-VERDICT') return fromBody
+    }
+  }
+  const ser = stableJson(so)
+  return { verdict: 'NO-VERDICT', detail: ser.ok ? ser.text.slice(-400) : '' }
+}
+
+// Grok schema mode puts the payload in structuredOutput, not text. Prefer
+// that field when the auditor return is a JSON envelope (string or object).
+function unwrapAuditPayload(raw) {
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    if (t.startsWith('{')) {
+      try {
+        const obj = JSON.parse(t)
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) return unwrapAuditPayload(obj)
+      } catch { /* plain text */ }
+    }
+    return { kind: 'text', value: raw }
+  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    if (Object.prototype.hasOwnProperty.call(raw, 'structuredOutput') && raw.structuredOutput != null) {
+      return { kind: 'structured', value: raw.structuredOutput }
+    }
+    if (typeof raw.text === 'string') return { kind: 'text', value: raw.text }
+  }
+  return null
+}
+
+function wrapperErrorText(raw) {
+  if (typeof raw === 'string' && isWrapperError(raw)) return raw
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    if (typeof raw.text === 'string' && isWrapperError(raw.text)) return raw.text
+    if (typeof raw.structuredOutput === 'string' && isWrapperError(raw.structuredOutput)) {
+      return raw.structuredOutput
+    }
+  }
+  return null
+}
+
+function verdictOf(raw) {
+  if (raw == null || (typeof raw === 'string' && !raw.trim())) {
+    return { verdict: 'ERROR', detail: 'auditor returned nothing' }
+  }
+  // Transport failures stay ERROR even if a VERDICT line appears later.
+  // Envelope-form wrappers (text/structuredOutput beginning with the
+  // sentinel) are transport faults, not missing-verdict cases.
+  const wrap = wrapperErrorText(raw)
+  if (wrap != null) return { verdict: 'ERROR', detail: wrap.slice(0, 300) }
+  const unwrapped = unwrapAuditPayload(raw)
+  if (!unwrapped) {
+    return typeof raw === 'string'
+      ? parseVerdictLines(raw)
+      : { verdict: 'ERROR', detail: 'auditor returned nothing' }
+  }
+  if (unwrapped.kind === 'text' && isWrapperError(unwrapped.value)) {
+    return { verdict: 'ERROR', detail: unwrapped.value.slice(0, 300) }
+  }
+  if (unwrapped.kind === 'structured') return verdictFromStructured(unwrapped.value)
+  return parseVerdictLines(unwrapped.value)
+}
+
+// Authoritative four-state audit contract. `verdict` remains a compatibility
+// projection (PASS/DEFECT/NO-VERDICT/ERROR); consumers that need to branch on
+// remediation must read `status`, never the boolean `approved` alone.
+const AUDIT_STATUS = {
+  PASS: 'pass',
+  DEFECT: 'defect',
+  'NO-VERDICT': 'no_verdict',
+  ERROR: 'transport_error',
+}
+
+function statusOf(parsed) {
+  const v = parsed && parsed.verdict
+  return AUDIT_STATUS[v] || 'transport_error'
+}
+
+// Relay-supplied session only. Never synthesize an identity that could
+// authorize a context-free re-ask PASS.
+function realSessionIdOf(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    if (typeof raw.sessionId === 'string' && raw.sessionId.trim()) return raw.sessionId.trim()
+    if (typeof raw.session_id === 'string' && raw.session_id.trim()) return raw.session_id.trim()
+  }
+  return null
+}
+
+// Deterministic body extractor: preserve critique text / structured body
+// rather than JSON-escaping a whole envelope. If no textual body exists,
+// fall back to a stable JSON representation; serialization failure is
+// reported so the caller never treats the attempt as PASS.
+function extractAuditBody(raw) {
+  if (typeof raw === 'string') {
+    const t = raw.trim()
+    if (t.startsWith('{')) {
+      try {
+        const obj = JSON.parse(t)
+        if (obj && typeof obj === 'object' && !Array.isArray(obj)) return extractAuditBody(obj)
+      } catch { /* plain text critique */ }
+    }
+    return { ok: true, body: raw }
+  }
+  if (raw == null) return { ok: true, body: '' }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    if (Object.prototype.hasOwnProperty.call(raw, 'structuredOutput') && raw.structuredOutput != null) {
+      const so = raw.structuredOutput
+      if (typeof so === 'string') return { ok: true, body: so }
+      if (so && typeof so === 'object' && !Array.isArray(so)) {
+        for (const key of ['text', 'body', 'critique', 'content']) {
+          if (typeof so[key] === 'string') return { ok: true, body: so[key] }
+        }
+        const ser = stableJson(so)
+        if (!ser.ok) return { ok: false, error: ser.error, body: '' }
+        return { ok: true, body: ser.text }
+      }
+      const ser = stableJson(so)
+      if (!ser.ok) return { ok: false, error: ser.error, body: '' }
+      return { ok: true, body: ser.text }
+    }
+    if (typeof raw.text === 'string') return { ok: true, body: raw.text }
+    const ser = stableJson(raw)
+    if (!ser.ok) return { ok: false, error: ser.error, body: '' }
+    return { ok: true, body: ser.text }
+  }
+  try { return { ok: true, body: String(raw) } }
+  catch (e) { return { ok: false, error: (e && e.message) || 'body extraction failed', body: '' } }
+}
+
+// Normalize worker envelopes before sentinel/empty checks and auditPrompt so
+// object returns are never coerced to the literal "[object Object]".
+function normalizeWorkerOutput(output) {
+  if (output == null) return { kind: 'null', value: null }
+  if (typeof output === 'string') {
+    if (isWrapperError(output)) return { kind: 'wrapper_error', value: output }
+    if (!output.trim()) return { kind: 'empty', value: output }
+    return { kind: 'text', value: output }
+  }
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    if (typeof output.text === 'string' && isWrapperError(output.text)) {
+      return { kind: 'wrapper_error', value: output.text }
+    }
+    if (typeof output.structuredOutput === 'string' && isWrapperError(output.structuredOutput)) {
+      return { kind: 'wrapper_error', value: output.structuredOutput }
+    }
+    let text = null
+    if (Object.prototype.hasOwnProperty.call(output, 'structuredOutput') && output.structuredOutput != null) {
+      const so = output.structuredOutput
+      if (typeof so === 'string') text = so
+      else if (so && typeof so === 'object' && !Array.isArray(so)) {
+        for (const key of ['text', 'body', 'critique', 'content']) {
+          if (typeof so[key] === 'string') { text = so[key]; break }
+        }
+        if (text == null) {
+          const ser = stableJson(so)
+          if (!ser.ok) return { kind: 'error', value: null, error: ser.error }
+          text = ser.text
+        }
+      } else {
+        const ser = stableJson(so)
+        if (!ser.ok) return { kind: 'error', value: null, error: ser.error }
+        text = ser.text
+      }
+    } else if (typeof output.text === 'string') {
+      text = output.text
+    } else {
+      const ser = stableJson(output)
+      if (!ser.ok) return { kind: 'error', value: null, error: ser.error }
+      text = ser.text
+    }
+    if (text == null || !String(text).trim()) return { kind: 'empty', value: text == null ? '' : text }
+    if (isWrapperError(text)) return { kind: 'wrapper_error', value: text }
+    return { kind: 'text', value: text }
+  }
+  try {
+    const s = String(output)
+    if (!s.trim()) return { kind: 'empty', value: s }
+    return { kind: 'text', value: s }
+  } catch (e) {
+    return { kind: 'error', value: null, error: (e && e.message) || 'worker output unusable' }
+  }
+}
+
+const VERDICT_REASK_PROMPT = [
+  'This is finalization of the already-inspected review — do not re-examine the material.',
+  'Your previous audit reply is missing a final machine-parseable verdict line.',
+  'Reply with exactly one line and nothing else:',
+  'VERDICT: PASS',
+  'or',
+  'VERDICT: DEFECT — <one-line summary of the worst defect>',
+].join('\n')
 
 function voicesFor(t) {
   const r = routes[t.id]
@@ -343,6 +574,204 @@ function voicesFor(t) {
 }
 
 // ------------------------------ execute --------------------------------
+// Full audit bodies leave via run-scoped files, not the returned object —
+// model relay transport is the failure boundary for large critiques.
+// reviewRoot is caller-owned for the process lifetime: the workflow never
+// deletes it. Consumers must copy artifacts they need beyond tmp retention.
+const fs = await import('node:fs')
+const path = await import('node:path')
+const os = await import('node:os')
+const crypto = await import('node:crypto')
+const reviewRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xmodel-review-'))
+const REVIEW_RETENTION = 'caller-owned-run-scoped; workflow does not delete; subject to OS tmp reapers'
+
+function persistAuditReview(taskId, voiceId, bodyText) {
+  const body = typeof bodyText === 'string' ? bodyText : ''
+  const safeTask = String(taskId).replace(/[^A-Za-z0-9._-]+/g, '_')
+  const safeVoice = String(voiceId).replace(/[^A-Za-z0-9._-]+/g, '_')
+  const review_path = path.join(
+    reviewRoot,
+    `${safeTask}.${safeVoice}.${crypto.randomBytes(16).toString('hex')}.txt`,
+  )
+  fs.writeFileSync(review_path, body, 'utf8')
+  // Byte length from the written file — JS string length is not UTF-8 bytes.
+  const review_bytes = fs.statSync(review_path).size
+  return { review_path, review_bytes }
+}
+
+// One voice owned by a single state machine: dispatch, normalize, immediate
+// artifact persistence, status, and an append-only attempts evidence ledger.
+// Thrown dispatches are caught here so parallel's null-on-rejection cannot
+// erase retry semantics or error identity. Defects never retry. Transport
+// retries once. no_verdict re-asks once, and only with a real relay session.
+async function runAuditVoice(t, voiceId, output) {
+  const agentType = cfg.agentPrefix + cfg.auditors[voiceId].agent
+  const baseOpts = { phase: 'Audit', agentType, effort: 'low' }
+  const attempts = []
+
+  async function dispatch(prompt, label, sessionId) {
+    try {
+      const opts = { ...baseOpts, label }
+      if (sessionId) opts.sessionId = sessionId
+      const raw = await agent(prompt, opts)
+      return { ok: true, raw, error: null }
+    } catch (e) {
+      return { ok: false, raw: null, error: (e && e.message) || 'auditor dispatch threw' }
+    }
+  }
+
+  function recordAttempt(kind, label, dispatchResult) {
+    let parsed
+    let session_id = null
+    let body = ''
+    let bodyOk = true
+    let bodyError = null
+
+    if (!dispatchResult.ok) {
+      parsed = { verdict: 'ERROR', detail: dispatchResult.error }
+      body = `DISPATCH-ERROR: ${dispatchResult.error}`
+    } else {
+      parsed = verdictOf(dispatchResult.raw)
+      session_id = realSessionIdOf(dispatchResult.raw)
+      const extracted = extractAuditBody(dispatchResult.raw)
+      if (!extracted.ok) {
+        bodyOk = false
+        bodyError = extracted.error || 'body extraction failed'
+        body = ''
+        // Never approve when body extraction failed — force transport_error.
+        parsed = { verdict: 'ERROR', detail: bodyError }
+      } else {
+        body = extracted.body
+      }
+    }
+
+    let review_path = null
+    let review_bytes = 0
+    let persistence_error = null
+    try {
+      const artifact = persistAuditReview(t.id, `${voiceId}.${kind}`, body)
+      review_path = artifact.review_path
+      review_bytes = artifact.review_bytes
+    } catch (e) {
+      persistence_error = (e && e.message) || 'artifact persistence failed'
+      parsed = { verdict: 'ERROR', detail: persistence_error }
+    }
+
+    const status = statusOf(parsed)
+    const attempt = {
+      kind,
+      label,
+      status,
+      verdict: parsed.verdict,
+      detail: parsed.detail,
+      session_id,
+      review_path,
+      review_bytes,
+      ...(bodyOk ? {} : { body_error: bodyError }),
+      ...(persistence_error ? { persistence_error } : {}),
+    }
+    attempts.push(attempt)
+    return attempt
+  }
+
+  try {
+    const primaryLabel = `audit-${voiceId}:${t.id}`
+    let terminal = recordAttempt(
+      'primary',
+      primaryLabel,
+      await dispatch(auditPrompt(t, cfg.auditors[voiceId], output), primaryLabel, null),
+    )
+
+    // Only transport faults retry — never a model-found defect. Persist
+    // attempt 1 first (above); attempt 2 is a separate ledger entry.
+    if (terminal.status === 'transport_error') {
+      const retryLabel = `audit-${voiceId}:${t.id}:retry`
+      terminal = recordAttempt(
+        'retry',
+        retryLabel,
+        await dispatch(auditPrompt(t, cfg.auditors[voiceId], output), retryLabel, null),
+      )
+    }
+
+    // Missing verdict: one finalization re-ask only when the relay supplied a
+    // real non-empty session identity. Synthetic ids are not authorized.
+    if (terminal.status === 'no_verdict' && terminal.session_id) {
+      const reaskLabel = `audit-${voiceId}:${t.id}:reask`
+      terminal = recordAttempt(
+        'reask',
+        reaskLabel,
+        await dispatch(VERDICT_REASK_PROMPT, reaskLabel, terminal.session_id),
+      )
+      if (terminal.status !== 'pass' && terminal.status !== 'defect' && terminal.status !== 'transport_error') {
+        // Still missing after the single re-ask — remain non-PASS.
+        terminal = {
+          ...terminal,
+          status: 'no_verdict',
+          verdict: 'NO-VERDICT',
+          detail: terminal.detail || attempts[attempts.length - 1].detail,
+        }
+        attempts[attempts.length - 1] = {
+          ...attempts[attempts.length - 1],
+          status: 'no_verdict',
+          verdict: 'NO-VERDICT',
+        }
+      }
+    }
+
+    const primary = attempts.find(a => a.kind === 'primary') || attempts[0]
+    const reask = attempts.find(a => a.kind === 'reask')
+    const retries = attempts.filter(a => a.kind === 'retry').length
+    const reasks = attempts.filter(a => a.kind === 'reask').length
+    // Terminal projection: last attempt wins; compatibility fields keep the
+    // primary artifact path (always persisted) and optional reask artifact.
+    return {
+      status: terminal.status,
+      verdict: terminal.verdict,
+      detail: terminal.detail,
+      review_path: primary.review_path,
+      review_bytes: primary.review_bytes,
+      ...(reask && reask.review_path
+        ? { reask_path: reask.review_path, reask_bytes: reask.review_bytes }
+        : {}),
+      retries,
+      reasks,
+      session_id: terminal.session_id || primary.session_id || null,
+      attempts,
+    }
+  } catch (e) {
+    // Last-resort: never throw into parallel. Persist an explicit fault row.
+    const detail = (e && e.message) || 'audit state machine failed'
+    let artifact = { review_path: null, review_bytes: 0 }
+    let persistence_error = null
+    try {
+      artifact = persistAuditReview(t.id, `${voiceId}.fault`, `DISPATCH-ERROR: ${detail}`)
+    } catch (pe) {
+      persistence_error = (pe && pe.message) || 'artifact persistence failed'
+    }
+    const attempt = {
+      kind: 'primary',
+      label: `audit-${voiceId}:${t.id}`,
+      status: 'transport_error',
+      verdict: 'ERROR',
+      detail: persistence_error || detail,
+      session_id: null,
+      ...artifact,
+      ...(persistence_error ? { persistence_error } : {}),
+    }
+    return {
+      status: 'transport_error',
+      verdict: 'ERROR',
+      detail: attempt.detail,
+      review_path: artifact.review_path,
+      review_bytes: artifact.review_bytes,
+      retries: 0,
+      reasks: 0,
+      session_id: null,
+      attempts: [attempt],
+    }
+  }
+}
+
 const results = await pipeline(
   runnable,
   // A throw in worker dispatch would otherwise drop the item to null and it
@@ -359,16 +788,19 @@ const results = await pipeline(
     const r = routes[t.id]
     const base = { id: t.id, lane: r.laneName, effort: r.effort, band: r.band, source: r.source }
     if (res && res.threw) return { ...base, output: null, approved: false, error: res.threw }
-    const output = res ? res.output : null
-    if (output == null) return { ...base, output: null, approved: false, error: 'worker returned null (skipped or died)' }
-    if (isWrapperError(output)) {
-      return { ...base, output, approved: false, error: 'worker lane failed — see output' }
+    const rawOutput = res ? res.output : null
+    if (rawOutput == null) return { ...base, output: null, approved: false, error: 'worker returned null (skipped or died)' }
+    const norm = normalizeWorkerOutput(rawOutput)
+    if (norm.kind === 'wrapper_error') {
+      return { ...base, output: norm.value, approved: false, error: 'worker lane failed — see output' }
     }
-    // Empty successful output is not something to audit and approve — a
-    // relay that produced nothing usable is a failure.
-    if (typeof output === 'string' && !output.trim()) {
-      return { ...base, output, approved: false, error: 'worker returned empty output' }
+    if (norm.kind === 'empty') {
+      return { ...base, output: norm.value, approved: false, error: 'worker returned empty output' }
     }
+    if (norm.kind === 'error') {
+      return { ...base, output: null, approved: false, error: norm.error || 'worker output unusable' }
+    }
+    const output = norm.value
     const voices = voicesFor(t)
     if (!voices.length) {
       if (r.audit === 'none') {
@@ -380,15 +812,49 @@ const results = await pipeline(
       log(`audit REQUIRED for ${t.id} (audit=${r.audit}) but no auditor available — marking not approved`)
       return { ...base, output, approved: false, error: `audit required (${r.audit}) but no auditor available` }
     }
-    const votes = await parallel(voices.map(id => () =>
-      agent(auditPrompt(t, cfg.auditors[id], output), {
-        label: `audit-${id}:${t.id}`, phase: 'Audit',
-        agentType: cfg.agentPrefix + cfg.auditors[id].agent, effort: 'low',
-      })
-    ))
+    const votes = await parallel(voices.map(id => () => runAuditVoice(t, id, output)))
     const audit = {}
-    voices.forEach((id, i) => { audit[id] = verdictOf(votes[i]) })
-    const approved = voices.every(id => audit[id].verdict === 'PASS')
+    for (let i = 0; i < voices.length; i++) {
+      const id = voices[i]
+      const entry = votes[i]
+      if (entry && typeof entry === 'object') {
+        audit[id] = entry
+        continue
+      }
+      // Safety net: runAuditVoice is not supposed to throw/return null, but if
+      // parallel still collapses a vote, emit an explicit transport_error row
+      // rather than dropping the voice or the whole item.
+      let artifact = { review_path: null, review_bytes: 0 }
+      let persistence_error = null
+      try {
+        artifact = persistAuditReview(t.id, `${id}.fault`, 'DISPATCH-ERROR: auditor dispatch failed')
+      } catch (e) {
+        persistence_error = (e && e.message) || 'artifact persistence failed'
+      }
+      const attempt = {
+        kind: 'primary',
+        label: `audit-${id}:${t.id}`,
+        status: 'transport_error',
+        verdict: 'ERROR',
+        detail: persistence_error || 'auditor dispatch failed',
+        session_id: null,
+        ...artifact,
+        ...(persistence_error ? { persistence_error } : {}),
+      }
+      audit[id] = {
+        status: 'transport_error',
+        verdict: 'ERROR',
+        detail: attempt.detail,
+        review_path: artifact.review_path,
+        review_bytes: artifact.review_bytes,
+        retries: 0,
+        reasks: 0,
+        session_id: null,
+        attempts: [attempt],
+      }
+    }
+    // Compatibility projection only — authoritative state is per-voice status.
+    const approved = voices.every(id => audit[id].status === 'pass')
     return { ...base, output, audit, approved }
   },
 )
@@ -398,4 +864,9 @@ if (doAudit) {
   const audited = done.filter(x => x.audit)
   log(`${audited.filter(x => x.approved).length}/${audited.length} audited item(s) approved; ${done.filter(x => x.approved === null).length} skipped audit`)
 }
-return { results: done, rejected }
+return {
+  results: done,
+  rejected,
+  review_root: reviewRoot,
+  review_retention: REVIEW_RETENTION,
+}
